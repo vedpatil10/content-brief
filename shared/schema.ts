@@ -1,18 +1,28 @@
-import { sql } from "drizzle-orm";
-import { pgTable, text, varchar } from "drizzle-orm/pg-core";
-import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-export const users = pgTable("users", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
+export const generateBriefsSchema = z.object({
+  sheetUrl: z.string().url().refine(
+    (url) => url.includes("docs.google.com/spreadsheets"),
+    "Must be a Google Sheets URL"
+  ),
 });
 
-export const insertUserSchema = createInsertSchema(users).pick({
-  username: true,
-  password: true,
-});
+export type GenerateBriefsInput = z.infer<typeof generateBriefsSchema>;
 
-export type InsertUser = z.infer<typeof insertUserSchema>;
-export type User = typeof users.$inferSelect;
+export interface BriefResult {
+  keyword: string;
+  brief_content: string;
+  timestamp: string;
+}
+
+export interface ProgressEvent {
+  type: "started" | "searching" | "filtering" | "scraping" | "summarizing" | "generating" | "complete" | "error" | "keyword_start" | "keyword_complete";
+  keyword?: string;
+  message: string;
+  current?: number;
+  total?: number;
+}
+
+export const users = {} as any;
+export type InsertUser = any;
+export type User = any;

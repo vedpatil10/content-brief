@@ -1,37 +1,28 @@
-import { type User, type InsertUser } from "@shared/schema";
-import { randomUUID } from "crypto";
-
-// modify the interface with any CRUD methods
-// you might need
+import type { BriefResult } from "@shared/schema";
 
 export interface IStorage {
-  getUser(id: string): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
+  storeJob(jobId: string, briefs: BriefResult[]): void;
+  getJob(jobId: string): BriefResult[] | undefined;
+  deleteJob(jobId: string): void;
 }
 
 export class MemStorage implements IStorage {
-  private users: Map<string, User>;
+  private jobs: Map<string, BriefResult[]>;
 
   constructor() {
-    this.users = new Map();
+    this.jobs = new Map();
   }
 
-  async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+  storeJob(jobId: string, briefs: BriefResult[]): void {
+    this.jobs.set(jobId, briefs);
   }
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
+  getJob(jobId: string): BriefResult[] | undefined {
+    return this.jobs.get(jobId);
   }
 
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
-    return user;
+  deleteJob(jobId: string): void {
+    this.jobs.delete(jobId);
   }
 }
 
