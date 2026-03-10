@@ -1,0 +1,615 @@
+{
+  "name": "Bulk Brief Tool Workflow V2",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "3f70895e-2a1a-4aa5-95af-b061076be24a",
+      "name": "When clicking 'Test workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "content": "# Upload Your CSV File\n\nYour CSV should have ONE column named: **keyword**\n\nExample:\n```\nkeyword\nbest coffee makers\ntop running shoes\ndigital marketing tips\n```\n\nUpload the file in the next node.",
+        "height": 300,
+        "width": 400
+      },
+      "id": "636e0a6c-6c97-4ebc-99f3-835ab37a8678",
+      "name": "Instructions",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -16,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://docs.google.com/spreadsheets/d/1x7IpYnHqQk6QLWoaUPRsskn0H5mFyCn0jlMWk6KkOOo/export?format=csv&gid=0",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        208,
+        160
+      ],
+      "id": "7adcea59-0950-41b5-a367-b313aa93574b",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "options": {
+          "headerRow": true
+        }
+      },
+      "id": "ab144d61-95f5-4cf1-84fc-69e93f1b81f0",
+      "name": "Read CSV File",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [
+        432,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "5fd8e565-fee8-4d18-84b9-2ea3e2d36e69",
+      "name": "Loop Over Keywords",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        656,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://google.serper.dev/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.keyword }}"
+            },
+            {
+              "name": "num",
+              "value": "10"
+            },
+            {}
+          ]
+        },
+        "options": {}
+      },
+      "id": "c11b7291-da6e-494b-a0f4-225138af61f6",
+      "name": "Google Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        880,
+        160
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ksGjodRCwYtlHyOv",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get search results\nconst searchResults = $input.item.json.organic || [];\n\n// Only exclude obvious non-scrapeable domains\nconst excludedDomains = [\n  'reddit.com', 'facebook.com', 'instagram.com', \n  'twitter.com', 'x.com', 'tiktok.com', 'pinterest.com',\n  'youtube.com', 'linkedin.com'\n];\n\n// Filter function\nfunction shouldExclude(url) {\n  const lowerUrl = url.toLowerCase();\n  return excludedDomains.some(domain => lowerUrl.includes(domain));\n}\n\n// Extract and filter results\nconst cleanResults = [];\nfor (const result of searchResults) {\n  if (!result.link) continue;\n  if (shouldExclude(result.link)) continue;\n  \n  cleanResults.push({\n    title: result.title || '',\n    link: result.link,\n    snippet: result.snippet || '',\n    position: result.position || 0\n  });\n  \n  if (cleanResults.length >= 3) break;\n}\n\nconst keyword = $input.item.json.keyword || \n                $('Loop Over Keywords').item.json.keyword;\n\nreturn {\n  json: {\n    filtered_results: cleanResults,\n    keyword: keyword\n  }\n};"
+      },
+      "id": "65372ad9-818c-47d7-ba38-c2a673d303ee",
+      "name": "Filter Search Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1088,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the filtered results and keyword from the previous node\nconst filteredResults = $input.item.json.filtered_results;\nconst keyword = $input.item.json.keyword;\n\n// Create the prompt text\nconst promptText = `SEARCH RESULTS:\n\n${JSON.stringify(filteredResults, null, 2)}\n\nKEYWORD: ${keyword}\n\nTASK: From the search results above, select the best 3 URLs (maximum 6 if highly relevant) that would provide the most comprehensive information for creating a content brief about '${keyword}'.\n\nExclude any URLs that:\n- Cannot be scraped (dynamic sites, login required)\n- Are from social media, forums, or review sites\n- Are too general or not specific to the keyword\n\nReturn ONLY a JSON array with this exact structure:\n[\n  {\"title\": \"...\", \"link\": \"...\", \"snippet\": \"...\"},\n  {\"title\": \"...\", \"link\": \"...\", \"snippet\": \"...\"}\n]\n\nNo other text or explanation. Just the JSON array.`;\n\n// Create the complete Gemini API payload\nconst geminiPayload = {\n  contents: [{\n    parts: [{\n      text: promptText\n    }]\n  }],\n  generationConfig: {\n    temperature: 0.1,\n    maxOutputTokens: 8192\n  }\n};\n\n// Return BOTH the payload AND the keyword\nreturn {\n  geminiPayload: geminiPayload,\n  keyword: keyword\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1296,
+        160
+      ],
+      "id": "7cb22100-49f6-423d-8a48-ffa60b7288d8",
+      "name": "Prepare Gemini Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contents",
+              "value": "={{ $input.item.json.geminiPayload.contents }}"
+            },
+            {
+              "name": "generationConfig",
+              "value": "={{ $input.item.json.geminiPayload.generationConfig }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 5000
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "c4175f49-d3c2-4f1e-a7c6-1e25ad705328",
+      "name": "Gemini Filter Top URLs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1520,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "FeflThNte3ELU58S",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get Gemini response\nconst geminiResponse = $input.item.json;\nlet contentText = '';\n\n// Extract text from Gemini response\nif (geminiResponse.candidates && geminiResponse.candidates[0]) {\n  const parts = geminiResponse.candidates[0].content.parts;\n  if (parts && parts[0]) {\n    contentText = parts[0].text;\n  }\n}\n\n// Clean markdown code blocks if present\ncontentText = contentText.replace(/```json/g, '').replace(/```/g, '').trim();\n\n// Extract JSON array\nfunction extractJsonArray(text) {\n  const start = text.indexOf('[');\n  const end = text.lastIndexOf(']');\n  if (start === -1 || end === -1) return [];\n  try {\n    return JSON.parse(text.substring(start, end + 1));\n  } catch (e) {\n    console.error('Failed to parse JSON:', e);\n    return [];\n  }\n}\n\nconst urls = extractJsonArray(contentText);\nconst keyword = $input.item.json.keyword || $('Loop Over Keywords').item.json.keyword;\n\nreturn {\n  json: {\n    urls: urls,\n    keyword: keyword\n  }\n};"
+      },
+      "id": "dbab7e54-d344-4fc6-a9c1-4b1da3a0512a",
+      "name": "Extract URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1744,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "urls",
+        "include": "allOtherFields",
+        "options": {}
+      },
+      "id": "796ea36f-4360-4d5d-8133-8054c2e44d6e",
+      "name": "Split URLs",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3,
+      "position": [
+        1968,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://production-sfo.browserless.io/screenshot?token=2TCgxugLTMBGtFD7b9c44b2b370400a65014ac34f06adfad3",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"{{ $json.urls.link }}\"\n}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 3000
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "1cb2358c-55d1-4456-8ac8-181068266825",
+      "name": "Scrape Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2384,
+        160
+      ],
+      "alwaysOutputData": true,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"WEBPAGE CONTENT:\\n\\n{{ $json.data || $json.body || 'Content not available' }}\\n\\nSOURCE URL: {{ $('Split URLs').item.json.urls.link }}\\n\\nKEYWORD: {{ $('Extract URLs').item.json.keyword }}\\n\\nTASK: Analyze this webpage and extract:\\n1. Main heading structure (H1, H2, H3)\\n2. Key topics covered\\n3. Word count estimate\\n4. Unique angles or approaches\\n5. Content format (guide, listicle, article, etc.)\\n6. Notable features (FAQs, tables, examples, etc.)\\n\\nFocus ONLY on content relevant to '{{ $('Extract URLs').item.json.keyword }}'. Strip away navigation, ads, footers.\\n\\nProvide detailed summary with source URL at the end:\\nSource: {{ $('Split URLs').item.json.urls.link }}\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.3,\n    \"maxOutputTokens\": 4000\n  }\n}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 15000
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "fbd005b0-c803-479b-81d0-51400c583804",
+      "name": "Gemini Summarize Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2608,
+        160
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "NnT2lPUwp0APDTWu",
+          "name": "Header Auth account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "6a11d098-8cec-4420-b9a9-9de9ce5464bf",
+      "name": "Aggregate Summaries",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        2832,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get all items\nconst allItems = $input.all();\n\n// Extract summaries from Gemini responses\nconst summaries = allItems.map(item => {\n  if (item.json.candidates && item.json.candidates[0]) {\n    const parts = item.json.candidates[0].content.parts;\n    if (parts && parts[0]) {\n      return parts[0].text;\n    }\n  }\n  return '';\n}).filter(Boolean);\n\n// Get keyword from earlier in the workflow\nconst keyword = $('Extract URLs').item.json.keyword;\n\n// Combine all summaries\nconst combinedAnalysis = summaries.join('\\n\\n---\\n\\n');\n\nreturn {\n  competitor_analysis: combinedAnalysis,\n  keyword: keyword,\n  num_competitors: summaries.length\n};"
+      },
+      "id": "0dda4a97-a6d3-4896-a90e-927b217d81d8",
+      "name": "Combine Summaries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3056,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"You are Britta, an expert content strategist AI that creates detailed content briefs.\\n\\nKEYWORD: {{ $json.keyword }}\\n\\nCOMPETITOR ANALYSIS:\\n{{ $json.competitor_analysis }}\\n\\nTASK: Create a comprehensive content brief following this exact structure:\\n\\nCONTENT BRIEF: {{ $json.keyword }}\\n\\n===================================\\nPAGE TITLE OPTIONS\\n===================================\\nAnalyze shared keywords across competing pages and provide 3 title options:\\n1. [Title 1]\\n2. [Title 2]\\n3. [Title 3]\\n\\n===================================\\nHEADING STRUCTURE\\n===================================\\nH1: [Main heading]\\n\\nH2: [Section 1]\\nWriter Notes:\\n- Key points: [list main points to cover based on competitor analysis]\\n- Research needed: [specific research requirements]\\n- Style guide: [tone and approach recommendations]\\n- Examples: [reference examples from competing pages]\\n- Watch out for: [common pitfalls observed]\\n\\n  H3: [Subsection 1.1]\\n  H3: [Subsection 1.2]\\n\\n[Continue with 5-6 H2 sections total, each with writer notes]\\n\\n===================================\\nFAQS\\n===================================\\n1. [Question 1]\\n2. [Question 2]\\n3. [Question 3]\\n4. [Question 4]\\n5. [Question 5]\\n6. [Question 6]\\n\\n===================================\\nCONTENT SPECIFICATIONS\\n===================================\\nWord Count Range: [X - Y words based on competitor analysis]\\nPage Goal: [Primary objective]\\nTarget Persona: [Audience description]\\nPage Format: [Recommended format]\\n\\n===================================\\nTECHNICAL SEO ELEMENTS\\n===================================\\nMeta Description Options:\\n1. [Meta description 1]\\n2. [Meta description 2]\\n\\nURL Structure: [recommended URL format]\\n\\nKeyword Clusters:\\n- Primary: {{ $json.keyword }}\\n- Secondary: [related keywords from analysis]\\n- Long-tail: [long-tail variations]\\n\\nEntity Recommendations:\\n- [entity 1]\\n- [entity 2]\\n- [entity 3]\\n\\nSemantic Search Terms:\\n- [term 1]\\n- [term 2]\\n- [term 3]\\n\\n===================================\\nCONTENT ENHANCEMENT IDEAS\\n===================================\\nLists/Tables:\\n- [suggestion 1]\\n- [suggestion 2]\\n\\nEEAT Incorporation:\\n- [EEAT element 1]\\n- [EEAT element 2]\\n\\nCTA Recommendations:\\n- [CTA placement and messaging]\\n\\nExternal Linking Strategy:\\n- [linking recommendations]\\n\\nMedia Placement:\\n- [media suggestions]\\n\\n===================================\\nOPPORTUNITIES & GAPS\\n===================================\\n[List content gaps found in competitor analysis]\\n\\n===================================\\nEND OF BRIEF\\n===================================\\n\\nGenerate the complete brief based STRICTLY on the competitor analysis provided. Be specific and actionable.\"\n    }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.5,\n    \"maxOutputTokens\": 8000\n  }\n}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 5000
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "852911ac-f775-4c34-8438-1155611a6162",
+      "name": "Gemini Generate Brief",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        3264,
+        160
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "21rN6MYa766iYP6f",
+          "name": "Header Auth account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the generated brief from Gemini\nconst geminiResponse = $input.item.json;\nlet briefContent = '';\n\n// Extract text from Gemini response\nif (geminiResponse.candidates && geminiResponse.candidates[0]) {\n  const parts = geminiResponse.candidates[0].content.parts;\n  if (parts && parts[0]) {\n    briefContent = parts[0].text;\n  }\n}\n\n// Get keyword from the Combine Summaries node\nconst keyword = $('Combine Summaries').item.json.keyword;\n\n// Fallback if keyword is not found\nif (!keyword) {\n  console.error('Keyword not found!');\n  return {\n    filename: 'brief_unknown.txt',\n    keyword: 'unknown',\n    brief_content: briefContent,\n    timestamp: new Date().toISOString()\n  };\n}\n\n// Create filename\nconst filename = `brief_${keyword.replace(/\\s+/g, '_')}.txt`;\n\n// Add generation timestamp\nconst timestamp = new Date().toISOString();\nconst finalBrief = `${briefContent}\\n\\n---\\nGenerated: ${timestamp}\\n`;\n\nreturn {\n  filename: filename,\n  keyword: keyword,\n  brief_content: finalBrief,\n  timestamp: timestamp\n};"
+      },
+      "id": "939ed4da-6254-4656-9e91-9674a42e55e8",
+      "name": "Format Brief",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3488,
+        160
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "6eb8c9fa-dc0e-4a77-bd13-820d2e12db2b",
+      "name": "Loop Back",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3696,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collect all the briefs from the workflow\nconst allItems = $input.all();\n\nconst briefs = allItems.map(item => ({\n  keyword: item.json.keyword,\n  filename: item.json.filename,\n  brief_content: item.json.brief_content,\n  timestamp: item.json.timestamp\n}));\n\nreturn briefs.map(brief => ({\n  json: brief,\n  binary: {\n    data: {\n      data: Buffer.from(brief.brief_content).toString('base64'),\n      mimeType: 'text/plain',\n      fileName: brief.filename\n    }\n  }\n}));"
+      },
+      "id": "e8b766bc-6343-401d-8fea-cd3f5fc95e0d",
+      "name": "Collect All Briefs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3696,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2176,
+        160
+      ],
+      "id": "0833b262-3a5a-4a8c-9827-afe416d3f25b",
+      "name": "Wait",
+      "webhookId": "efaeed9e-faac-4b80-9419-f5dfb84c00ba"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking 'Test workflow'": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Read CSV File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CSV File": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Keywords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Keywords": {
+      "main": [
+        [
+          {
+            "node": "Collect All Briefs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Google Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Search": {
+      "main": [
+        [
+          {
+            "node": "Filter Search Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Search Results": {
+      "main": [
+        [
+          {
+            "node": "Prepare Gemini Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Gemini Request": {
+      "main": [
+        [
+          {
+            "node": "Gemini Filter Top URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Filter Top URLs": {
+      "main": [
+        [
+          {
+            "node": "Extract URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract URLs": {
+      "main": [
+        [
+          {
+            "node": "Split URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split URLs": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Website": {
+      "main": [
+        [
+          {
+            "node": "Gemini Summarize Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Summarize Content": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Summaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Summaries": {
+      "main": [
+        [
+          {
+            "node": "Combine Summaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Summaries": {
+      "main": [
+        [
+          {
+            "node": "Gemini Generate Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Generate Brief": {
+      "main": [
+        [
+          {
+            "node": "Format Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Brief": {
+      "main": [
+        [
+          {
+            "node": "Loop Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Back": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Keywords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Scrape Website",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "da38b0fa-e589-4b37-a1d6-6e8188452f7b",
+  "meta": {
+    "instanceId": "667bd79c681138e570586bf354733d259b23672571a21e0fecfe1dee1cb587ae"
+  },
+  "id": "3ESrFl077v85KaQp",
+  "tags": []
+}
