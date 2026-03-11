@@ -1,16 +1,16 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { BriefResult, ProgressEvent } from "@shared/schema";
 import { log } from "./index";
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
-  httpOptions: {
-    apiVersion: "",
-    baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
-  },
-});
+// Lazy initialization of Gemini instances to ensure environment variables are loaded
+const getAI_Filter = () => new GoogleGenerativeAI(process.env.GEMINI_API_KEY_FILTER || "");
+const getAI_Summarize = () => new GoogleGenerativeAI(process.env.GEMINI_API_KEY_SUMMARIZE || "");
+const getAI_Brief = () => new GoogleGenerativeAI(process.env.GEMINI_API_KEY_BRIEF || "");
+
+const getModelName = () => process.env.GEMINI_MODEL || "gemini-1.5-flash";
 
 const SERPER_API_KEY = () => process.env.SERPER_API_KEY || "";
+
 
 type SendEvent = (event: ProgressEvent) => void;
 
@@ -18,7 +18,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, waitMs = 5000): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, waitMs = 15000): Promise<T> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
@@ -192,16 +192,11 @@ Return ONLY a JSON array with this exact structure:
 No other text or explanation. Just the JSON array.`;
 
   return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: promptText,
-      config: {
-        temperature: 0.1,
-        maxOutputTokens: 8192,
-      },
-    });
+    const model = getAI_Filter().getGenerativeModel({ model: getModelName() });
+    const result = await model.generateContent(promptText);
+    const response = await result.response;
+    let contentText = response.text();
 
-    let contentText = response.text || "";
     contentText = contentText.replace(/```json/g, "").replace(/```/g, "").trim();
 
     const start = contentText.indexOf("[");
@@ -277,16 +272,11 @@ Provide detailed summary with source URL at the end:
 Source: ${sourceUrl}`;
 
   return withRetry(async () => {
-    await delay(3000);
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        temperature: 0.3,
-        maxOutputTokens: 4000,
-      },
-    });
-    return response.text || "";
+    await delay(6000);
+    const model = getAI_Summarize().getGenerativeModel({ model: getModelName() });
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
   });
 }
 
@@ -378,16 +368,11 @@ Based on competitor analysis, here's how to make this content stand out:
 Make the brief actionable, specific, and based on the actual competitor analysis provided. Every recommendation should be supported by evidence from the competing pages.`;
 
   return withRetry(async () => {
-    await delay(5000);
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        temperature: 0.7,
-        maxOutputTokens: 8192,
-      },
-    });
-    return response.text || "";
+    await delay(10000);
+    const model = getAI_Brief().getGenerativeModel({ model: getModelName() });
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
   });
 }
 
@@ -503,3 +488,4 @@ export async function processWorkflow(
 
   return allBriefs;
 }
+

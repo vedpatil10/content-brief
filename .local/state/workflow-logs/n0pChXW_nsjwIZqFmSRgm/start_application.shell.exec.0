@@ -1,0 +1,13 @@
+
+> rest-express@1.0.0 dev
+> NODE_ENV=development tsx server/index.ts
+
+[1G[0K1:19:47 PM [express] serving on port 5000
+
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+1:35:34 PM [workflow] Brief generated for keyword: best coffee makers
+1:37:12 PM [workflow] Brief generated for keyword: best tourist places in 2025
+1:38:40 PM [workflow] Brief generated for keyword: how to start a blog
+1:39:58 PM [workflow] Brief generated for keyword: SEO tools for beginners
+1:41:28 PM [workflow] Brief generated for keyword: digital marketing tips
+1:41:28 PM [express] POST /api/generate-briefs 200 in 436381ms

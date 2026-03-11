@@ -1,0 +1,9 @@
+
+> rest-express@1.0.0 dev
+> NODE_ENV=development tsx server/index.ts
+
+[1G[0K1:19:00 PM [express] serving on port 5000
+
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+Workflow error: Failed to fetch Google Sheet. Make sure the sheet is shared publicly (Anyone with the link can view).
+1:19:20 PM [express] POST /api/generate-briefs 200 in 103ms
