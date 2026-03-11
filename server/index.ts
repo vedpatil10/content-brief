@@ -78,14 +78,14 @@ app.use((req, res, next) => {
     return res.status(status).json({ message });
   });
 
-  if (process.env.NODE_ENV === "production" || process.env.VERCEL) {
+  if (process.env.NODE_ENV === "production" && !process.env.VERCEL) {
     serveStatic(app);
-  } else {
+  } else if (!process.env.VERCEL) {
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
   }
 
-  if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+  if (!process.env.VERCEL) {
     const port = parseInt(process.env.PORT || "5000", 10);
     httpServer.listen(
       {
@@ -100,5 +100,6 @@ app.use((req, res, next) => {
 })();
 
 export default app;
+
 
 
