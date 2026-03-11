@@ -2,8 +2,8 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage.js";
 import { processWorkflow } from "./workflow.js";
-import { generateBriefsSchema } from "@shared/schema";
-import type { ProgressEvent, BriefResult } from "@shared/schema";
+import { generateBriefsSchema } from "../shared/schema.js";
+import type { ProgressEvent, BriefResult } from "../shared/schema.js";
 import { randomUUID } from "crypto";
 import ExcelJS from "exceljs";
 

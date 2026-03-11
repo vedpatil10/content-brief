@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import type { BriefResult, ProgressEvent } from "@shared/schema";
+import type { BriefResult, ProgressEvent } from "../shared/schema.js";
+
 import { log } from "./index.js";
 
 
