@@ -1,7 +1,8 @@
 import express, { type Express } from "express";
 import fs from "fs";
 import path from "path";
-import { log } from "./index";
+import { log } from "./index.js";
+
 
 export function serveStatic(app: Express) {
   if (process.env.VERCEL) {

@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
-import { processWorkflow } from "./workflow";
+import { storage } from "./storage.js";
+import { processWorkflow } from "./workflow.js";
 import { generateBriefsSchema } from "@shared/schema";
 import type { ProgressEvent, BriefResult } from "@shared/schema";
 import { randomUUID } from "crypto";

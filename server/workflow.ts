@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { BriefResult, ProgressEvent } from "@shared/schema";
-import { log } from "./index";
+import { log } from "./index.js";
+
 
 // Lazy initialization of Gemini instances to ensure environment variables are loaded
 const getAI_Filter = () => new GoogleGenerativeAI(process.env.GEMINI_API_KEY_FILTER || "");
