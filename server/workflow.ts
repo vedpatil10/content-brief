@@ -25,10 +25,32 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 10, waitMs = 2000
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
-    } catch (error) {
+    } catch (error: any) {
       if (attempt === maxRetries) throw error;
-      log(`Retry ${attempt}/${maxRetries} after error: ${error instanceof Error ? error.message : "unknown"}`, "workflow");
-      await delay(waitMs);
+
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      let backoff = waitMs;
+
+      // Smart Retry: Detect Gemini 429 Quota errors and parse retryDelay
+      if (errorMessage.includes("429") || errorMessage.includes("Quota exceeded")) {
+        log(`Quota hit on attempt ${attempt}. Searching for retry delay...`, "workflow");
+        
+        // Try to find "retryDelay": "Xs" in the error message (provided by Google Cloud API)
+        const delayMatch = errorMessage.match(/"retryDelay":\s*"(\d+)s"/);
+        if (delayMatch && delayMatch[1]) {
+          const seconds = parseInt(delayMatch[1], 10);
+          backoff = (seconds + 2) * 1000; // Add 2 seconds buffer
+          log(`Found explicit retry delay: ${seconds}s. Waiting ${backoff / 1000}s...`, "workflow");
+        } else {
+          // Default to a longer wait for quota issues if no explicit delay found
+          backoff = Math.max(waitMs, 60000); 
+          log(`No explicit delay found for 429. Waiting 60s default...`, "workflow");
+        }
+      } else {
+        log(`Retry ${attempt}/${maxRetries} after error: ${errorMessage}`, "workflow");
+      }
+
+      await delay(backoff);
     }
   }
   throw new Error("Exhausted retries after 10 attempts");
@@ -403,8 +425,8 @@ export async function processSingleKeyword(
   const topUrls = await geminiFilterTopUrls(filtered_results, keyword);
 
   // Parallelize scraping and summarizing within a single keyword
-  // We use p-limit to avoid hitting Gemini too hard at once
-  const limit = pLimit(3);
+  // We use p-limit(1) to stay under Gemini's Free Tier RPM limits
+  const limit = pLimit(1);
   const summaryPromises = topUrls.map((url, j) =>
     limit(async () => {
       sendEvent({
