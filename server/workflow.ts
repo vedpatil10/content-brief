@@ -1,16 +1,16 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
 import type { BriefResult, ProgressEvent } from "../shared/schema.js";
 import pLimit from "p-limit";
 
 import { log } from "./index.js";
 
 
-// Lazy initialization of Gemini instances to ensure environment variables are loaded
-const getAI_Filter = () => new GoogleGenerativeAI(process.env.GEMINI_API_KEY_FILTER || "");
-const getAI_Summarize = () => new GoogleGenerativeAI(process.env.GEMINI_API_KEY_SUMMARIZE || "");
-const getAI_Brief = () => new GoogleGenerativeAI(process.env.GEMINI_API_KEY_BRIEF || "");
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || "",
+});
 
-const getModelName = () => process.env.GEMINI_MODEL || "gemini-1.5-flash";
+const getModelName = () => process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 const SERPER_API_KEY = () => process.env.SERPER_API_KEY || "";
 
@@ -21,7 +21,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 10, waitMs = 20000): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, waitMs = 5000): Promise<T> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
@@ -31,21 +31,10 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 10, waitMs = 2000
       const errorMessage = error instanceof Error ? error.message : String(error);
       let backoff = waitMs;
 
-      // Smart Retry: Detect Gemini 429 Quota errors and parse retryDelay
-      if (errorMessage.includes("429") || errorMessage.includes("Quota exceeded")) {
-        log(`Quota hit on attempt ${attempt}. Searching for retry delay...`, "workflow");
-        
-        // Try to find "retryDelay": "Xs" in the error message (provided by Google Cloud API)
-        const delayMatch = errorMessage.match(/"retryDelay":\s*"(\d+)s"/);
-        if (delayMatch && delayMatch[1]) {
-          const seconds = parseInt(delayMatch[1], 10);
-          backoff = (seconds + 2) * 1000; // Add 2 seconds buffer
-          log(`Found explicit retry delay: ${seconds}s. Waiting ${backoff / 1000}s...`, "workflow");
-        } else {
-          // Default to a longer wait for quota issues if no explicit delay found
-          backoff = Math.max(waitMs, 60000); 
-          log(`No explicit delay found for 429. Waiting 60s default...`, "workflow");
-        }
+      // Smart Retry: Detect OpenAI Rate Limit errors
+      if (errorMessage.includes("429") || errorMessage.includes("rate_limit")) {
+        log(`Rate limit hit on attempt ${attempt}. Waiting 30s...`, "workflow");
+        backoff = 30000;
       } else {
         log(`Retry ${attempt}/${maxRetries} after error: ${errorMessage}`, "workflow");
       }
@@ -53,7 +42,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 10, waitMs = 2000
       await delay(backoff);
     }
   }
-  throw new Error("Exhausted retries after 10 attempts");
+  throw new Error(`Exhausted retries after ${maxRetries} attempts`);
 }
 
 function extractSheetId(url: string): string {
@@ -194,7 +183,7 @@ function filterSearchResults(results: SearchResult[], keyword: string): { filter
   return { filtered_results: cleanResults, keyword };
 }
 
-async function geminiFilterTopUrls(filteredResults: SearchResult[], keyword: string): Promise<SearchResult[]> {
+async function openaiFilterTopUrls(filteredResults: SearchResult[], keyword: string): Promise<SearchResult[]> {
   const promptText = `SEARCH RESULTS:
 
 ${JSON.stringify(filteredResults, null, 2)}
@@ -217,19 +206,18 @@ Return ONLY a JSON array with this exact structure:
 No other text or explanation. Just the JSON array.`;
 
   return withRetry(async () => {
-    const model = getAI_Filter().getGenerativeModel({ model: getModelName() });
-    const result = await model.generateContent(promptText);
-    const response = await result.response;
-    let contentText = response.text();
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: promptText }],
+      response_format: { type: "json_object" },
+    });
 
-    contentText = contentText.replace(/```json/g, "").replace(/```/g, "").trim();
-
-    const start = contentText.indexOf("[");
-    const end = contentText.lastIndexOf("]");
-    if (start === -1 || end === -1) return filteredResults;
-
+    let contentText = response.choices[0].message.content || "[]";
+    
     try {
-      return JSON.parse(contentText.substring(start, end + 1));
+      // Some models might wrap the array in an object if forced to JSON mode
+      const parsed = JSON.parse(contentText);
+      return Array.isArray(parsed) ? parsed : (parsed.urls || parsed.results || Object.values(parsed)[0]);
     } catch {
       return filteredResults;
     }
@@ -274,7 +262,7 @@ async function scrapeWebsite(url: string): Promise<string> {
   }
 }
 
-async function geminiSummarizeContent(content: string, sourceUrl: string, keyword: string): Promise<string> {
+async function openaiSummarizeContent(content: string, sourceUrl: string, keyword: string): Promise<string> {
   const prompt = `WEBPAGE CONTENT:
 
 ${content}
@@ -297,15 +285,15 @@ Provide detailed summary with source URL at the end:
 Source: ${sourceUrl}`;
 
   return withRetry(async () => {
-    await delay(6000);
-    const model = getAI_Summarize().getGenerativeModel({ model: getModelName() });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text();
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: prompt }],
+    });
+    return response.choices[0].message.content || "";
   });
 }
 
-async function geminiGenerateBrief(keyword: string, competitorAnalysis: string): Promise<string> {
+async function openaiGenerateBrief(keyword: string, competitorAnalysis: string): Promise<string> {
   const prompt = `You are Britta, an expert content strategist AI that creates detailed content briefs.
 
 KEYWORD: ${keyword}
@@ -393,11 +381,11 @@ Based on competitor analysis, here's how to make this content stand out:
 Make the brief actionable, specific, and based on the actual competitor analysis provided. Every recommendation should be supported by evidence from the competing pages.`;
 
   return withRetry(async () => {
-    await delay(10000);
-    const model = getAI_Brief().getGenerativeModel({ model: getModelName() });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text();
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: prompt }],
+    });
+    return response.choices[0].message.content || "";
   });
 }
 
@@ -422,11 +410,11 @@ export async function processSingleKeyword(
   const { filtered_results } = filterSearchResults(searchResults, keyword);
 
   sendEvent({ type: "filtering", keyword, message: `Using AI to select best URLs for "${keyword}"...`, current: index + 1, total: total });
-  const topUrls = await geminiFilterTopUrls(filtered_results, keyword);
+  const topUrls = await openaiFilterTopUrls(filtered_results, keyword);
 
   // Parallelize scraping and summarizing within a single keyword
-  // We use p-limit(1) to stay under Gemini's Free Tier RPM limits
-  const limit = pLimit(1);
+  // We use p-limit(2) for OpenAI to be efficient but safe
+  const limit = pLimit(2);
   const summaryPromises = topUrls.map((url, j) =>
     limit(async () => {
       sendEvent({
@@ -447,7 +435,7 @@ export async function processSingleKeyword(
         total: total,
       });
 
-      return geminiSummarizeContent(content, url.link, keyword);
+      return openaiSummarizeContent(content, url.link, keyword);
     })
   );
 
@@ -464,7 +452,7 @@ export async function processSingleKeyword(
     total: total,
   });
 
-  const briefContent = await geminiGenerateBrief(keyword, combinedAnalysis);
+  const briefContent = await openaiGenerateBrief(keyword, combinedAnalysis);
   const timestamp = new Date().toISOString();
   const finalBrief = `${briefContent}\n\n---\nGenerated: ${timestamp}\n`;
 
@@ -500,7 +488,6 @@ export async function processWorkflow(
 
   const allBriefs: BriefResult[] = [];
 
-  // Keep compatibility for now, but in a real-world scenario we'd use processSingleKeyword
   for (let i = 0; i < keywords.length; i++) {
     try {
       const brief = await processSingleKeyword(keywords[i], i, keywords.length, sendEvent);
