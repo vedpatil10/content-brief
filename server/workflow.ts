@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { BriefResult, ProgressEvent } from "../shared/schema.js";
+import pLimit from "p-limit";
 
 import { log } from "./index.js";
 
@@ -20,7 +21,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, waitMs = 15000): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 10, waitMs = 20000): Promise<T> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
@@ -30,7 +31,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, waitMs = 15000
       await delay(waitMs);
     }
   }
-  throw new Error("Exhausted retries");
+  throw new Error("Exhausted retries after 10 attempts");
 }
 
 function extractSheetId(url: string): string {
@@ -64,7 +65,7 @@ function parseCSVLine(line: string): string[] {
   return result;
 }
 
-async function fetchKeywordsFromSheet(sheetUrl: string): Promise<string[]> {
+export async function fetchKeywordsFromSheet(sheetUrl: string): Promise<string[]> {
   const sheetId = extractSheetId(sheetUrl);
   const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0`;
 
@@ -378,6 +379,90 @@ Make the brief actionable, specific, and based on the actual competitor analysis
   });
 }
 
+export async function processSingleKeyword(
+  keyword: string,
+  index: number,
+  total: number,
+  sendEvent: SendEvent
+): Promise<BriefResult> {
+  sendEvent({
+    type: "keyword_start",
+    keyword,
+    message: `Processing keyword ${index + 1}/${total}: "${keyword}"`,
+    current: index + 1,
+    total: total,
+  });
+
+  sendEvent({ type: "searching", keyword, message: `Searching Google for "${keyword}"...`, current: index + 1, total: total });
+  const searchResults = await googleSearch(keyword);
+
+  sendEvent({ type: "filtering", keyword, message: `Filtering search results for "${keyword}"...`, current: index + 1, total: total });
+  const { filtered_results } = filterSearchResults(searchResults, keyword);
+
+  sendEvent({ type: "filtering", keyword, message: `Using AI to select best URLs for "${keyword}"...`, current: index + 1, total: total });
+  const topUrls = await geminiFilterTopUrls(filtered_results, keyword);
+
+  // Parallelize scraping and summarizing within a single keyword
+  // We use p-limit to avoid hitting Gemini too hard at once
+  const limit = pLimit(3);
+  const summaryPromises = topUrls.map((url, j) =>
+    limit(async () => {
+      sendEvent({
+        type: "scraping",
+        keyword,
+        message: `Processing competitor page ${j + 1}/${topUrls.length}...`,
+        current: index + 1,
+        total: total,
+      });
+
+      const content = await scrapeWebsite(url.link);
+
+      sendEvent({
+        type: "summarizing",
+        keyword,
+        message: `Analyzing content from competitor page ${j + 1}/${topUrls.length}...`,
+        current: index + 1,
+        total: total,
+      });
+
+      return geminiSummarizeContent(content, url.link, keyword);
+    })
+  );
+
+  const summariesResult = await Promise.all(summaryPromises);
+  const summaries = summariesResult.filter(Boolean) as string[];
+
+  const combinedAnalysis = summaries.join("\n\n---\n\n");
+
+  sendEvent({
+    type: "generating",
+    keyword,
+    message: `Generating content brief for "${keyword}"...`,
+    current: index + 1,
+    total: total,
+  });
+
+  const briefContent = await geminiGenerateBrief(keyword, combinedAnalysis);
+  const timestamp = new Date().toISOString();
+  const finalBrief = `${briefContent}\n\n---\nGenerated: ${timestamp}\n`;
+
+  sendEvent({
+    type: "keyword_complete",
+    keyword,
+    message: `Completed brief for "${keyword}"`,
+    current: index + 1,
+    total: total,
+  });
+
+  log(`Brief generated for keyword: ${keyword}`, "workflow");
+
+  return {
+    keyword,
+    brief_content: finalBrief,
+    timestamp,
+  };
+}
+
 export async function processWorkflow(
   sheetUrl: string,
   sendEvent: SendEvent
@@ -393,88 +478,18 @@ export async function processWorkflow(
 
   const allBriefs: BriefResult[] = [];
 
+  // Keep compatibility for now, but in a real-world scenario we'd use processSingleKeyword
   for (let i = 0; i < keywords.length; i++) {
-    const keyword = keywords[i];
-
-    sendEvent({
-      type: "keyword_start",
-      keyword,
-      message: `Processing keyword ${i + 1}/${keywords.length}: "${keyword}"`,
-      current: i + 1,
-      total: keywords.length,
-    });
-
     try {
-      sendEvent({ type: "searching", keyword, message: `Searching Google for "${keyword}"...`, current: i + 1, total: keywords.length });
-      const searchResults = await googleSearch(keyword);
-
-      sendEvent({ type: "filtering", keyword, message: `Filtering search results for "${keyword}"...`, current: i + 1, total: keywords.length });
-      const { filtered_results } = filterSearchResults(searchResults, keyword);
-
-      sendEvent({ type: "filtering", keyword, message: `Using AI to select best URLs for "${keyword}"...`, current: i + 1, total: keywords.length });
-      const topUrls = await geminiFilterTopUrls(filtered_results, keyword);
-
-      const summaries: string[] = [];
-      for (let j = 0; j < topUrls.length; j++) {
-        const url = topUrls[j];
-        sendEvent({
-          type: "scraping",
-          keyword,
-          message: `Scraping page ${j + 1}/${topUrls.length}: ${url.title || url.link}`,
-          current: i + 1,
-          total: keywords.length,
-        });
-
-        const content = await scrapeWebsite(url.link);
-
-        sendEvent({
-          type: "summarizing",
-          keyword,
-          message: `Analyzing content from page ${j + 1}/${topUrls.length}...`,
-          current: i + 1,
-          total: keywords.length,
-        });
-
-        const summary = await geminiSummarizeContent(content, url.link, keyword);
-        if (summary) summaries.push(summary);
-      }
-
-      const combinedAnalysis = summaries.join("\n\n---\n\n");
-
-      sendEvent({
-        type: "generating",
-        keyword,
-        message: `Generating content brief for "${keyword}"...`,
-        current: i + 1,
-        total: keywords.length,
-      });
-
-      const briefContent = await geminiGenerateBrief(keyword, combinedAnalysis);
-      const timestamp = new Date().toISOString();
-      const finalBrief = `${briefContent}\n\n---\nGenerated: ${timestamp}\n`;
-
-      allBriefs.push({
-        keyword,
-        brief_content: finalBrief,
-        timestamp,
-      });
-
-      sendEvent({
-        type: "keyword_complete",
-        keyword,
-        message: `Completed brief for "${keyword}"`,
-        current: i + 1,
-        total: keywords.length,
-      });
-
-      log(`Brief generated for keyword: ${keyword}`, "workflow");
+      const brief = await processSingleKeyword(keywords[i], i, keywords.length, sendEvent);
+      allBriefs.push(brief);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      log(`Error processing keyword "${keyword}": ${errorMessage}`, "workflow");
+      log(`Error processing keyword "${keywords[i]}": ${errorMessage}`, "workflow");
       sendEvent({
         type: "error",
-        keyword,
-        message: `Error processing "${keyword}": ${errorMessage}`,
+        keyword: keywords[i],
+        message: `Error processing "${keywords[i]}": ${errorMessage}`,
         current: i + 1,
         total: keywords.length,
       });

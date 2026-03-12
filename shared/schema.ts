@@ -7,6 +7,20 @@ export const generateBriefsSchema = z.object({
   ),
 });
 
+export const processKeywordSchema = z.object({
+  keyword: z.string(),
+  index: z.number(),
+  total: z.number(),
+});
+
+export const generateExcelSchema = z.object({
+  briefs: z.array(z.object({
+    keyword: z.string(),
+    brief_content: z.string(),
+    timestamp: z.string(),
+  })),
+});
+
 export type GenerateBriefsInput = z.infer<typeof generateBriefsSchema>;
 
 export interface BriefResult {

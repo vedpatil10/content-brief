@@ -17,7 +17,7 @@ import {
   Sparkles,
   ArrowRight,
 } from "lucide-react";
-import type { ProgressEvent } from "@shared/schema";
+import type { ProgressEvent, BriefResult } from "@shared/schema";
 
 type Status = "idle" | "processing" | "complete" | "error";
 
@@ -35,8 +35,8 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [total, setTotal] = useState(0);
   const [current, setCurrent] = useState(0);
-  const [jobId, setJobId] = useState<string | null>(null);
   const [completedKeywords, setCompletedKeywords] = useState<CompletedKeyword[]>([]);
+  const [allBriefs, setAllBriefs] = useState<BriefResult[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const { toast } = useToast();
 
@@ -49,6 +49,91 @@ export default function Home() {
       case "generating": return <Sparkles className="h-4 w-4 animate-pulse" />;
       default: return <Loader2 className="h-4 w-4 animate-spin" />;
     }
+  };
+
+  const processKeyword = async (keyword: string, index: number, total: number) => {
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        const response = await fetch("/api/process-keyword", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword, index, total }),
+        });
+
+        if (!response.ok) throw new Error(`Failed to process keyword: ${keyword}`);
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No response stream");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const event = JSON.parse(line.slice(6));
+
+              if (event.type === "done") {
+                setAllBriefs((prev) => [...prev, event.brief]);
+                setCompletedKeywords((prev) => [...prev, { keyword: keyword, success: true }]);
+                return true;
+              }
+
+              const progressEvent = event as ProgressEvent;
+
+              if (progressEvent.total) setTotal(progressEvent.total);
+              if (progressEvent.current) setCurrent(progressEvent.current);
+              if (progressEvent.keyword) setCurrentKeyword(progressEvent.keyword);
+              setCurrentStep(progressEvent.type);
+              setProgressMessage(progressEvent.message);
+
+              if (progressEvent.total && progressEvent.current) {
+                const baseProgress = ((progressEvent.current - 1) / progressEvent.total) * 100;
+                let stepProgress = 0;
+                switch (progressEvent.type) {
+                  case "searching": stepProgress = 10; break;
+                  case "filtering": stepProgress = 25; break;
+                  case "scraping": stepProgress = 40; break;
+                  case "summarizing": stepProgress = 60; break;
+                  case "generating": stepProgress = 80; break;
+                  case "keyword_complete": stepProgress = 100; break;
+                }
+                const totalProgress = baseProgress + (stepProgress / progressEvent.total);
+                setProgress(Math.min(totalProgress, 99));
+              }
+
+              if (progressEvent.type === "error") {
+                throw new Error(progressEvent.message);
+              }
+            } catch (e: any) {
+              if (e.message.includes("Unexpected end of JSON input")) continue;
+              throw e;
+            }
+          }
+        }
+        return true;
+      } catch (error: any) {
+        retries--;
+        if (retries > 0) {
+          setProgressMessage(`Retrying "${keyword}" (${3 - retries}/3)...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        } else {
+          setCompletedKeywords((prev) => [...prev, { keyword, success: false }]);
+          console.error(`Error processing "${keyword}" after retries:`, error);
+          return false;
+        }
+      }
+    }
+    return false;
   };
 
   const handleGenerate = useCallback(async () => {
@@ -66,95 +151,45 @@ export default function Home() {
     setProgress(0);
     setTotal(0);
     setCurrent(0);
-    setJobId(null);
     setCompletedKeywords([]);
+    setAllBriefs([]);
     setErrorMessage("");
     setCurrentStep("");
     setCurrentKeyword("");
-    setProgressMessage("Starting...");
+    setProgressMessage("Fetching keywords...");
 
     try {
-      const response = await fetch("/api/generate-briefs", {
+      // Step 1: Get keywords
+      const kwResponse = await fetch("/api/get-keywords", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sheetUrl: sheetUrl.trim() }),
       });
 
-      if (!response.ok && !response.headers.get("content-type")?.includes("text/event-stream")) {
-        const err = await response.json();
-        throw new Error(err.error || "Failed to start generation");
+      if (!kwResponse.ok) {
+        const err = await kwResponse.json();
+        throw new Error(err.error || "Failed to fetch keywords");
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No response stream");
+      const { keywords } = await kwResponse.json();
+      if (!keywords || keywords.length === 0) {
+        throw new Error("No keywords found in the sheet");
+      }
 
-      const decoder = new TextDecoder();
-      let buffer = "";
+      setTotal(keywords.length);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-
-            if (event.type === "done") {
-              if (event.briefCount > 0) {
-                setJobId(event.jobId);
-                setStatus("complete");
-                setProgressMessage(`Completed! Generated ${event.briefCount} brief(s)`);
-              } else {
-                setStatus("error");
-                setErrorMessage("No briefs could be generated. All keywords failed processing.");
-              }
-              setProgress(100);
-              break;
-            }
-
-            const progressEvent = event as ProgressEvent;
-
-            if (progressEvent.total) setTotal(progressEvent.total);
-            if (progressEvent.current) setCurrent(progressEvent.current);
-            if (progressEvent.keyword) setCurrentKeyword(progressEvent.keyword);
-            setCurrentStep(progressEvent.type);
-            setProgressMessage(progressEvent.message);
-
-            if (progressEvent.total && progressEvent.current) {
-              const baseProgress = ((progressEvent.current - 1) / progressEvent.total) * 100;
-              let stepProgress = 0;
-              switch (progressEvent.type) {
-                case "searching": stepProgress = 10; break;
-                case "filtering": stepProgress = 25; break;
-                case "scraping": stepProgress = 40; break;
-                case "summarizing": stepProgress = 60; break;
-                case "generating": stepProgress = 80; break;
-                case "keyword_complete": stepProgress = 100; break;
-              }
-              const totalProgress = baseProgress + (stepProgress / progressEvent.total);
-              setProgress(Math.min(totalProgress, 99));
-            }
-
-            if (progressEvent.type === "keyword_complete" && progressEvent.keyword) {
-              setCompletedKeywords((prev) => [...prev, { keyword: progressEvent.keyword!, success: true }]);
-            }
-
-            if (progressEvent.type === "error" && progressEvent.keyword) {
-              setCompletedKeywords((prev) => [...prev, { keyword: progressEvent.keyword!, success: false }]);
-            }
-
-            if (progressEvent.type === "error" && !progressEvent.keyword) {
-              setErrorMessage(progressEvent.message);
-              setStatus("error");
-            }
-          } catch {}
+      // Step 2: Process keywords
+      for (let i = 0; i < keywords.length; i++) {
+        const success = await processKeyword(keywords[i], i, keywords.length);
+        if (!success) {
+          throw new Error(`Failed to process keyword: "${keywords[i]}". Stopping to ensure all keywords are processed successfully.`);
         }
       }
+
+      setStatus("complete");
+      setProgress(100);
+      setProgressMessage(`Completed! Generated briefs for keywords.`);
+      
     } catch (error) {
       const message = error instanceof Error ? error.message : "An error occurred";
       setErrorMessage(message);
@@ -163,9 +198,30 @@ export default function Home() {
     }
   }, [sheetUrl, toast]);
 
-  const handleDownload = () => {
-    if (!jobId) return;
-    window.open(`/api/download/${jobId}`, "_blank");
+  const handleDownload = async () => {
+    if (allBriefs.length === 0) return;
+    
+    try {
+      const response = await fetch("/api/generate-excel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ briefs: allBriefs }),
+      });
+
+      if (!response.ok) throw new Error("Failed to generate Excel");
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "content_briefs.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error: any) {
+      toast({ title: "Download Error", description: error.message, variant: "destructive" });
+    }
   };
 
   return (
@@ -282,7 +338,7 @@ export default function Home() {
           </Card>
         )}
 
-        {status === "complete" && jobId && (
+        {status === "complete" && allBriefs.length > 0 && (
           <Card className="border-green-500/30 bg-green-500/[0.03]">
             <CardContent className="pt-6 space-y-5">
               <div className="flex items-center gap-3">
