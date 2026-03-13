@@ -23,7 +23,9 @@ type Status = "idle" | "processing" | "complete" | "error";
 
 interface CompletedKeyword {
   keyword: string;
+  country?: string;
   success: boolean;
+  error?: string;
 }
 
 export default function Home() {
@@ -51,14 +53,15 @@ export default function Home() {
     }
   };
 
-  const processKeyword = async (keyword: string, index: number, total: number) => {
+  const processKeyword = async (item: { keyword: string; country?: string; rowIndex: number }, sheetUrl: string, index: number, total: number) => {
     let retries = 3;
+    const { keyword, country, rowIndex } = item;
     while (retries > 0) {
       try {
         const response = await fetch("/api/process-keyword", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ keyword, index, total }),
+          body: JSON.stringify({ keyword, country, rowIndex, sheetUrl, index, total }),
         });
 
         if (!response.ok) throw new Error(`Failed to process keyword: ${keyword}`);
@@ -84,7 +87,7 @@ export default function Home() {
 
               if (event.type === "done") {
                 setAllBriefs((prev) => [...prev, event.brief]);
-                setCompletedKeywords((prev) => [...prev, { keyword: keyword, success: true }]);
+                setCompletedKeywords((prev) => [...prev, { keyword: keyword, country: country, success: true }]);
                 return true;
               }
 
@@ -127,7 +130,7 @@ export default function Home() {
           setProgressMessage(`Retrying "${keyword}" (${3 - retries}/3)...`);
           await new Promise(resolve => setTimeout(resolve, 5000));
         } else {
-          setCompletedKeywords((prev) => [...prev, { keyword, success: false }]);
+          setCompletedKeywords((prev) => [...prev, { keyword, country, success: false, error: error.message }]);
           console.error(`Error processing "${keyword}" after retries:`, error);
           return false;
         }
@@ -180,9 +183,9 @@ export default function Home() {
 
       // Step 2: Process keywords
       for (let i = 0; i < keywords.length; i++) {
-        const success = await processKeyword(keywords[i], i, keywords.length);
+        const success = await processKeyword(keywords[i], sheetUrl.trim(), i, keywords.length);
         if (!success) {
-          throw new Error(`Failed to process keyword: "${keywords[i]}". Stopping to ensure all keywords are processed successfully.`);
+          throw new Error(`Failed to process keyword: "${keywords[i].keyword}". Stopping to ensure all keywords are processed successfully.`);
         }
       }
 
@@ -237,7 +240,7 @@ export default function Home() {
           </h1>
           <p className="text-muted-foreground text-lg max-w-xl mx-auto">
             Generate comprehensive SEO content briefs from your keywords.
-            Paste a Google Sheet URL with a "keyword" column and let AI do the rest.
+            Paste a Google Sheet URL with "keyword" and "country" columns and let AI do the rest.
           </p>
         </div>
 
@@ -248,7 +251,7 @@ export default function Home() {
               Google Sheet URL
             </CardTitle>
             <CardDescription>
-              Your sheet must be publicly accessible and have a column named "keyword"
+              Your sheet must be publicly accessible and have columns named "keyword" and "country"
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -305,6 +308,9 @@ export default function Home() {
                   {currentKeyword && (
                     <p className="text-xs text-muted-foreground mt-0.5">
                       Keyword: <span className="font-medium">{currentKeyword}</span>
+                      {completedKeywords.find(k => k.keyword === currentKeyword)?.country && (
+                        <> | Region: <span className="font-medium">{completedKeywords.find(k => k.keyword === currentKeyword)?.country}</span></>
+                      )}
                     </p>
                   )}
                 </div>
@@ -322,13 +328,14 @@ export default function Home() {
                         variant={item.success ? "secondary" : "destructive"}
                         className="gap-1.5"
                         data-testid={`badge-keyword-${idx}`}
+                        title={item.error}
                       >
                         {item.success ? (
                           <CheckCircle2 className="h-3 w-3" />
                         ) : (
                           <AlertCircle className="h-3 w-3" />
                         )}
-                        {item.keyword}
+                        {item.keyword} {item.country ? `(${item.country})` : ""}
                       </Badge>
                     ))}
                   </div>

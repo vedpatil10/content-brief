@@ -9,6 +9,7 @@ export const generateBriefsSchema = z.object({
 
 export const processKeywordSchema = z.object({
   keyword: z.string(),
+  country: z.string().optional(),
   index: z.number(),
   total: z.number(),
 });
@@ -16,8 +17,10 @@ export const processKeywordSchema = z.object({
 export const generateExcelSchema = z.object({
   briefs: z.array(z.object({
     keyword: z.string(),
+    country: z.string().optional(),
     brief_content: z.string(),
     timestamp: z.string(),
+    google_doc_url: z.string().optional(),
   })),
 });
 
@@ -25,8 +28,10 @@ export type GenerateBriefsInput = z.infer<typeof generateBriefsSchema>;
 
 export interface BriefResult {
   keyword: string;
+  country?: string;
   brief_content: string;
   timestamp: string;
+  google_doc_url?: string;
 }
 
 export interface ProgressEvent {

@@ -60,7 +60,8 @@ export async function registerRoutes(
 
     try {
       const { processSingleKeyword } = await import("./workflow.js");
-      const brief = await processSingleKeyword(keyword, index, total, sendEvent);
+      const { keyword, country, rowIndex, sheetUrl, index, total } = req.body;
+      const brief = await processSingleKeyword(keyword, country, rowIndex, index, total, sendEvent, sheetUrl);
       safeSend(`data: ${JSON.stringify({ type: "done", brief })}\n\n`);
     } catch (error: any) {
       console.error("Keyword processing error:", error?.message || error);
