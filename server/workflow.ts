@@ -416,6 +416,38 @@ function compactJson<T>(value: T): string {
   return JSON.stringify(value, null, 2);
 }
 
+function normalizeDraftSubsection(subsection: any): { heading: string; purpose: string; must_cover: string[] } | null {
+  const heading = String(subsection?.heading || "").trim();
+  if (!heading) return null;
+  return {
+    heading,
+    purpose: String(subsection?.purpose || "").trim(),
+    must_cover: safeStringArray(subsection?.must_cover),
+  };
+}
+
+function normalizeDraftSection(section: any): DraftBriefSection | null {
+  const heading = String(section?.heading || "").trim();
+  if (!heading) return null;
+
+  return {
+    level: section?.level === "H3" ? "H3" : "H2",
+    heading,
+    purpose: String(section?.purpose || "").trim(),
+    section_type: String(section?.section_type || "core").trim(),
+    must_cover: safeStringArray(section?.must_cover),
+    research_needed: safeStringArray(section?.research_needed),
+    differentiation: safeStringArray(section?.differentiation),
+    examples: safeStringArray(section?.examples),
+    watch_out_for: safeStringArray(section?.watch_out_for),
+    subsections: Array.isArray(section?.subsections)
+      ? section.subsections
+          .map(normalizeDraftSubsection)
+          .filter((subsection): subsection is { heading: string; purpose: string; must_cover: string[] } => Boolean(subsection))
+      : [],
+  };
+}
+
 function renderBullets(items: string[], emptyText = "None specified"): string {
   if (!items.length) return `- ${emptyText}`;
   return items.map((item) => `- ${item}`).join("\n");
@@ -1622,22 +1654,11 @@ Return JSON with this exact shape:
         must_cover: section.keyPoints,
       })),
     })));
-    const parsedSections: DraftBriefSection[] = Array.isArray(parsed.sections) ? parsed.sections.map((section: any) => ({
-      level: section?.level === "H3" ? "H3" : "H2",
-      heading: String(section?.heading || "").trim(),
-      purpose: String(section?.purpose || "").trim(),
-      section_type: String(section?.section_type || "core").trim(),
-      must_cover: safeStringArray(section?.must_cover),
-      research_needed: safeStringArray(section?.research_needed),
-      differentiation: safeStringArray(section?.differentiation),
-      examples: safeStringArray(section?.examples),
-      watch_out_for: safeStringArray(section?.watch_out_for),
-      subsections: Array.isArray(section?.subsections) ? section.subsections.map((subsection: any) => ({
-        heading: String(subsection?.heading || "").trim(),
-        purpose: String(subsection?.purpose || "").trim(),
-        must_cover: safeStringArray(subsection?.must_cover),
-      })).filter((subsection: any) => subsection.heading) : [],
-    })).filter((section: any) => section.heading) : [];
+    const parsedSections: DraftBriefSection[] = Array.isArray(parsed.sections)
+      ? parsed.sections
+          .map(normalizeDraftSection)
+          .filter((section): section is DraftBriefSection => Boolean(section))
+      : [];
     const parsedSubsectionCount = parsedSections.reduce((count, section) => count + section.subsections.length, 0);
     const venueMinimumSubsections = keywordSignals.primarySubject === "venues" ? Math.max(6, keywordSignals.listCount || 10) : 0;
     const toolMinimumSubsections = keywordSignals.primarySubject === "tools" ? Math.max(5, keywordSignals.listCount || 6) : 0;
@@ -1832,24 +1853,9 @@ Repair goals:
 
     const parsed = JSON.parse(response.choices[0].message.content || "{}") as any;
     const repairedSections: DraftBriefSection[] = Array.isArray(parsed.sections)
-      ? parsed.sections.map((section: any) => ({
-          level: section?.level === "H3" ? "H3" : "H2",
-          heading: String(section?.heading || "").trim(),
-          purpose: String(section?.purpose || "").trim(),
-          section_type: String(section?.section_type || "core").trim(),
-          must_cover: safeStringArray(section?.must_cover),
-          research_needed: safeStringArray(section?.research_needed),
-          differentiation: safeStringArray(section?.differentiation),
-          examples: safeStringArray(section?.examples),
-          watch_out_for: safeStringArray(section?.watch_out_for),
-          subsections: Array.isArray(section?.subsections)
-            ? section.subsections.map((subsection: any) => ({
-                heading: String(subsection?.heading || "").trim(),
-                purpose: String(subsection?.purpose || "").trim(),
-                must_cover: safeStringArray(subsection?.must_cover),
-              })).filter((subsection: any) => subsection.heading)
-            : [],
-        })).filter((section: DraftBriefSection) => section.heading)
+      ? parsed.sections
+          .map(normalizeDraftSection)
+          .filter((section): section is DraftBriefSection => Boolean(section))
       : currentBrief.sections;
     return {
       ...currentBrief,
