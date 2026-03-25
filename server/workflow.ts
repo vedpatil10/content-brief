@@ -290,6 +290,23 @@ interface BriefBlueprint {
   metaDescriptionAngles: string[];
 }
 
+interface DraftBriefSection {
+  level: "H2" | "H3";
+  heading: string;
+  purpose: string;
+  section_type: string;
+  must_cover: string[];
+  research_needed: string[];
+  differentiation: string[];
+  examples: string[];
+  watch_out_for: string[];
+  subsections: Array<{
+    heading: string;
+    purpose: string;
+    must_cover: string[];
+  }>;
+}
+
 function safeStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
 }
@@ -297,6 +314,10 @@ function safeStringArray(value: unknown): string[] {
 function renderBullets(items: string[], emptyText = "None specified"): string {
   if (!items.length) return `- ${emptyText}`;
   return items.map((item) => `- ${item}`).join("\n");
+}
+
+function buildRankedItemHeadings(keyword: string, count: number, label: string): string[] {
+  return Array.from({ length: count }, (_, index) => `${label} #${index + 1}: [Insert actual ${label.toLowerCase()} name]`);
 }
 
 function renderStructuredBrief(
@@ -791,6 +812,8 @@ Return a JSON object that adapts the brief to the keyword's real intent and loca
 
 Rules:
 - If the keyword is a local list query, the outline must center on ranked entities, selection criteria, neighborhoods/areas, pricing, standout features, and booking/visit guidance.
+- For restaurant, hotel, cafe, or venue keywords, the ranked list section must include one H3 entry for every requested item in the list whenever the keyword includes a number like top 10.
+- For restaurant keywords, each venue entry must require cuisine type, location, signature dishes, price point, ambiance, why it stands out, who it suits, drawbacks, and booking advice.
 - Only include food/menu/signature dish requirements when the keyword is clearly restaurant/cafe/food related.
 - If the keyword is a software/product query, emphasize comparison criteria, pricing, features, use cases, and alternatives.
 - If the keyword is a best/top tools query, you must make the outline tool-first, not advice-first. The main body should revolve around the tools themselves.
@@ -905,6 +928,17 @@ Rules:
   5. alternatives or best-for-use-case recommendations
 - For student tool keywords, every major tool subsection should require: what it is, how students can use it, strongest features, weaknesses, pricing, free plan, and alternatives.
 - For local business/place keywords, include entity-level fields such as location, neighborhood, price range, standout features, who it suits, drawbacks, and booking/visit details.
+- For restaurant keywords, if the keyword implies a ranked list, the output must include one subsection per restaurant entry and each subsection must require:
+  1. actual restaurant name
+  2. city or location
+  3. cuisine style
+  4. signature dishes or tasting menu highlights
+  5. pricing or price range
+  6. ambiance and dining experience
+  7. why it stands out
+  8. who it is best for
+  9. drawbacks or considerations
+  10. reservation or booking notes
 - For comparison keywords, include clear comparison criteria and head-to-head decision factors.
 - For informational/how-to keywords, include process depth, examples, mistakes, and implementation details.
 - Do not add filler sections like "How to choose" unless they are strongly supported by the SERP.
@@ -975,7 +1009,7 @@ Return JSON with this exact shape:
 
     const content = response.choices[0].message.content || "{}";
     const parsed = JSON.parse(content) as Partial<StructuredBrief>;
-    const defaultToolSections = keywordSignals.primarySubject === "tools" ? [
+    const defaultToolSections: DraftBriefSection[] = keywordSignals.primarySubject === "tools" ? [
       {
         level: "H2" as const,
         heading: `How We Evaluated ${keyword}`,
@@ -1029,7 +1063,83 @@ Return JSON with this exact shape:
         subsections: [],
       },
     ] : [];
-    const fallbackSections = blueprint.recommendedH2s.map((section) => ({
+    const defaultVenueSections: DraftBriefSection[] = keywordSignals.primarySubject === "venues" ? [
+      {
+        level: "H2" as const,
+        heading: `Selection Criteria for ${keyword}`,
+        purpose: "Explain exactly how the restaurants or venues were chosen so the ranking feels trustworthy.",
+        section_type: "selection criteria",
+        must_cover: ["food quality", "consistency", "signature dishes", "ambiance", "service", "value for money", "local reputation"],
+        research_needed: ["current rankings or press mentions", "city/location details", "signature menu highlights", "pricing signals"],
+        differentiation: ["use concrete dining criteria instead of vague praise"],
+        examples: [],
+        watch_out_for: ["generic criteria with no connection to dining experience"],
+        subsections: [
+          {
+            heading: "Food Quality and Signature Dishes",
+            purpose: "Define what makes a restaurant worth ranking.",
+            must_cover: ["ingredient quality", "signature dishes", "chef reputation"],
+          },
+          {
+            heading: "Experience, Service, and Value",
+            purpose: "Balance food quality with the full dining experience.",
+            must_cover: ["ambiance", "service", "price-value relationship"],
+          },
+        ],
+      },
+      {
+        level: "H2" as const,
+        heading: `Top ${keywordSignals.listCount || 10} Picks`,
+        purpose: "This must be the main section of the article with one subsection per ranked venue.",
+        section_type: "ranked venue list",
+        must_cover: keywordSignals.itemDetailRequirements,
+        research_needed: blueprint.requiredDataPoints,
+        differentiation: ["each venue entry should feel like a mini-review, not just a mention"],
+        examples: [],
+        watch_out_for: ["listing names without enough venue-specific detail"],
+        subsections: buildRankedItemHeadings(keyword, keywordSignals.listCount || 10, "Restaurant").map((heading) => ({
+          heading,
+          purpose: "Provide a deep venue-by-venue breakdown.",
+          must_cover: [
+            "actual restaurant name",
+            "city or location",
+            "cuisine style",
+            "signature dishes or tasting menu highlights",
+            "pricing or price range",
+            "ambiance and dining experience",
+            "why it stands out",
+            "who it is best for",
+            "drawbacks or considerations",
+            "reservation or booking notes",
+          ],
+        })),
+      },
+      {
+        level: "H2" as const,
+        heading: "Best by Dining Occasion",
+        purpose: "Help readers choose the right restaurant for different goals.",
+        section_type: "use-case mapping",
+        must_cover: ["best fine dining option", "best casual upscale option", "best for special occasions", "best value pick"],
+        research_needed: ["venue positioning", "menu style", "experience type"],
+        differentiation: ["turn the ranking into a practical decision guide"],
+        examples: [],
+        watch_out_for: ["repeating the same venue without explaining why it fits a use case"],
+        subsections: [],
+      },
+      {
+        level: "H2" as const,
+        heading: "Booking Tips and What to Know Before You Go",
+        purpose: "Add practical reader value beyond the ranking itself.",
+        section_type: "practical guidance",
+        must_cover: ["reservation timing", "dress code if relevant", "budget expectations", "special menu considerations"],
+        research_needed: ["booking patterns", "venue policies", "premium dining expectations"],
+        differentiation: ["give practical guidance that generic listicles usually miss"],
+        examples: [],
+        watch_out_for: ["guessing venue policies without evidence"],
+        subsections: [],
+      },
+    ] : [];
+    const fallbackSections: DraftBriefSection[] = blueprint.recommendedH2s.map((section) => ({
       level: "H2" as const,
       heading: section.heading,
       purpose: section.purpose,
@@ -1045,6 +1155,34 @@ Return JSON with this exact shape:
         must_cover: section.keyPoints,
       })),
     }));
+    const parsedSections: DraftBriefSection[] = Array.isArray(parsed.sections) ? parsed.sections.map((section: any) => ({
+      level: section?.level === "H3" ? "H3" : "H2",
+      heading: String(section?.heading || "").trim(),
+      purpose: String(section?.purpose || "").trim(),
+      section_type: String(section?.section_type || "core").trim(),
+      must_cover: safeStringArray(section?.must_cover),
+      research_needed: safeStringArray(section?.research_needed),
+      differentiation: safeStringArray(section?.differentiation),
+      examples: safeStringArray(section?.examples),
+      watch_out_for: safeStringArray(section?.watch_out_for),
+      subsections: Array.isArray(section?.subsections) ? section.subsections.map((subsection: any) => ({
+        heading: String(subsection?.heading || "").trim(),
+        purpose: String(subsection?.purpose || "").trim(),
+        must_cover: safeStringArray(subsection?.must_cover),
+      })).filter((subsection: any) => subsection.heading) : [],
+    })).filter((section: any) => section.heading) : [];
+    const parsedSubsectionCount = parsedSections.reduce((count, section) => count + section.subsections.length, 0);
+    const venueMinimumSubsections = keywordSignals.primarySubject === "venues" ? Math.max(6, keywordSignals.listCount || 10) : 0;
+    const toolMinimumSubsections = keywordSignals.primarySubject === "tools" ? Math.max(5, keywordSignals.listCount || 6) : 0;
+    const shouldUseVenueFallback = keywordSignals.primarySubject === "venues" && parsedSubsectionCount < venueMinimumSubsections;
+    const shouldUseToolFallback = keywordSignals.primarySubject === "tools" && parsedSubsectionCount < toolMinimumSubsections;
+    const finalSections = shouldUseVenueFallback
+      ? defaultVenueSections
+      : shouldUseToolFallback
+        ? defaultToolSections
+        : parsedSections.length
+          ? parsedSections
+          : (defaultVenueSections.length ? defaultVenueSections : defaultToolSections.length ? defaultToolSections : fallbackSections);
 
     return {
       search_intent: parsed.search_intent || blueprint.inferredIntent,
@@ -1055,22 +1193,7 @@ Return JSON with this exact shape:
         ? safeStringArray(parsed.title_options).slice(0, 3)
         : blueprint.suggestedTitleAngles.slice(0, 3),
       h1: parsed.h1 || keyword,
-      sections: Array.isArray(parsed.sections) ? parsed.sections.map((section: any) => ({
-        level: section?.level === "H3" ? "H3" : "H2",
-        heading: String(section?.heading || "").trim(),
-        purpose: String(section?.purpose || "").trim(),
-        section_type: String(section?.section_type || "core").trim(),
-        must_cover: safeStringArray(section?.must_cover),
-        research_needed: safeStringArray(section?.research_needed),
-        differentiation: safeStringArray(section?.differentiation),
-        examples: safeStringArray(section?.examples),
-        watch_out_for: safeStringArray(section?.watch_out_for),
-        subsections: Array.isArray(section?.subsections) ? section.subsections.map((subsection: any) => ({
-          heading: String(subsection?.heading || "").trim(),
-          purpose: String(subsection?.purpose || "").trim(),
-          must_cover: safeStringArray(subsection?.must_cover),
-        })).filter((subsection: any) => subsection.heading) : [],
-      })).filter((section: any) => section.heading) : (defaultToolSections.length ? defaultToolSections : fallbackSections),
+      sections: finalSections,
       item_template: safeStringArray(parsed.item_template).length
         ? safeStringArray(parsed.item_template)
         : keywordSignals.itemDetailRequirements,

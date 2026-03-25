@@ -59,6 +59,19 @@ function populateBriefWorksheet(worksheet: ExcelJS.Worksheet, brief: BriefResult
   titleRow.getCell(1).font = { bold: true, size: 16 };
   worksheet.mergeCells(`A${titleRow.number}:H${titleRow.number}`);
 
+  worksheet.addRow([]);
+  const readableHeader = worksheet.addRow(["Readable Brief"]);
+  readableHeader.getCell(1).font = { bold: true, size: 14 };
+  worksheet.mergeCells(`A${readableHeader.number}:H${readableHeader.number}`);
+  for (const line of brief.brief_content.split("\n")) {
+    const row = worksheet.addRow([line]);
+    worksheet.mergeCells(`A${row.number}:H${row.number}`);
+    row.getCell(1).alignment = { wrapText: true, vertical: "top" };
+    if (line.startsWith("CONTENT BRIEF:") || line.startsWith("H1:") || line.startsWith("H2:") || line.startsWith("  H3:")) {
+      row.getCell(1).font = { bold: true };
+    }
+  }
+
   addKeyValueRow(worksheet, "Keyword", brief.keyword);
   addKeyValueRow(worksheet, "Country", brief.country || "Not specified");
   if (brief.google_doc_url) addKeyValueRow(worksheet, "Google Doc", brief.google_doc_url);
