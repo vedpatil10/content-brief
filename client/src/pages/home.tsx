@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -25,6 +25,11 @@ type Status = "idle" | "processing" | "complete" | "error";
 interface CompletedKeyword {
   keyword: string;
   country?: string;
+  success: boolean;
+  error?: string;
+}
+
+interface KeywordProcessResult {
   success: boolean;
   error?: string;
 }
@@ -195,6 +200,8 @@ export default function Home() {
   const [completedKeywords, setCompletedKeywords] = useState<CompletedKeyword[]>([]);
   const [allBriefs, setAllBriefs] = useState<BriefResult[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
+  const maxProgressRef = useRef(0);
+  const maxCurrentRef = useRef(0);
   const { toast } = useToast();
 
   const getStepIcon = (type: string) => {
@@ -208,7 +215,12 @@ export default function Home() {
     }
   };
 
-  const processKeyword = async (item: { keyword: string; country?: string; rowIndex: number }, sheetUrl: string, index: number, total: number) => {
+  const processKeyword = async (
+    item: { keyword: string; country?: string; rowIndex: number },
+    sheetUrl: string,
+    index: number,
+    total: number
+  ): Promise<KeywordProcessResult> => {
     let retries = 3;
     const { keyword, country, rowIndex } = item;
     while (retries > 0) {
@@ -240,16 +252,19 @@ export default function Home() {
             try {
               const event = JSON.parse(line.slice(6));
 
-              if (event.type === "done") {
-                setAllBriefs((prev) => [...prev, event.brief]);
-                setCompletedKeywords((prev) => [...prev, { keyword: keyword, country: country, success: true }]);
-                return true;
-              }
+                if (event.type === "done") {
+                  setAllBriefs((prev) => [...prev, event.brief]);
+                  setCompletedKeywords((prev) => [...prev, { keyword: keyword, country: country, success: true }]);
+                  return { success: true };
+                }
 
               const progressEvent = event as ProgressEvent;
 
               if (progressEvent.total) setTotal(progressEvent.total);
-              if (progressEvent.current) setCurrent(progressEvent.current);
+              if (progressEvent.current) {
+                maxCurrentRef.current = Math.max(maxCurrentRef.current, progressEvent.current);
+                setCurrent(maxCurrentRef.current);
+              }
               if (progressEvent.keyword) setCurrentKeyword(progressEvent.keyword);
               setCurrentStep(progressEvent.type);
               setProgressMessage(progressEvent.message);
@@ -266,7 +281,8 @@ export default function Home() {
                   case "keyword_complete": stepProgress = 100; break;
                 }
                 const totalProgress = baseProgress + (stepProgress / progressEvent.total);
-                setProgress(Math.min(totalProgress, 99));
+                maxProgressRef.current = Math.max(maxProgressRef.current, Math.min(totalProgress, 99));
+                setProgress(maxProgressRef.current);
               }
 
               if (progressEvent.type === "error") {
@@ -278,7 +294,7 @@ export default function Home() {
             }
           }
         }
-        return true;
+        return { success: true };
       } catch (error: any) {
         retries--;
         if (retries > 0) {
@@ -287,11 +303,11 @@ export default function Home() {
         } else {
           setCompletedKeywords((prev) => [...prev, { keyword, country, success: false, error: error.message }]);
           console.error(`Error processing "${keyword}" after retries:`, error);
-          return false;
+          return { success: false, error: error.message };
         }
       }
     }
-    return false;
+    return { success: false, error: `Failed to process keyword: "${keyword}"` };
   };
 
   const handleGenerate = useCallback(async () => {
@@ -315,6 +331,8 @@ export default function Home() {
     setCurrentStep("");
     setCurrentKeyword("");
     setProgressMessage("Fetching keywords...");
+    maxProgressRef.current = 0;
+    maxCurrentRef.current = 0;
 
     try {
       // Step 1: Get keywords
@@ -337,16 +355,37 @@ export default function Home() {
       setTotal(keywords.length);
 
       // Step 2: Process keywords
+      const failures: Array<{ keyword: string; error: string }> = [];
       for (let i = 0; i < keywords.length; i++) {
-        const success = await processKeyword(keywords[i], sheetUrl.trim(), i, keywords.length);
-        if (!success) {
-          throw new Error(`Failed to process keyword: "${keywords[i].keyword}". Stopping to ensure all keywords are processed successfully.`);
+        const result = await processKeyword(keywords[i], sheetUrl.trim(), i, keywords.length);
+        if (!result.success) {
+          const failedKeyword = keywords[i].keyword;
+          failures.push({
+            keyword: failedKeyword,
+            error: result.error || `Failed to process keyword: "${failedKeyword}"`,
+          });
+          maxCurrentRef.current = Math.max(maxCurrentRef.current, i + 1);
+          setCurrent(maxCurrentRef.current);
+          const failureProgress = ((i + 1) / keywords.length) * 100;
+          maxProgressRef.current = Math.max(maxProgressRef.current, failureProgress);
+          setProgress(Math.min(maxProgressRef.current, 99));
         }
       }
 
       setStatus("complete");
       setProgress(100);
-      setProgressMessage(`Completed! Generated briefs for keywords.`);
+      maxProgressRef.current = 100;
+      const successCount = keywords.length - failures.length;
+      setProgressMessage(
+        failures.length
+          ? `Completed processing all keywords. Success: ${successCount}, Failed: ${failures.length}.`
+          : "Completed! Generated briefs for all keywords."
+      );
+      if (failures.length) {
+        const message = `Processed all keywords. Failed: ${failures.map((failure) => failure.keyword).join(", ")}`;
+        setErrorMessage(message);
+        toast({ title: "Completed With Some Failures", description: message, variant: "destructive" });
+      }
       
     } catch (error) {
       const message = error instanceof Error ? error.message : "An error occurred";
