@@ -17,6 +17,9 @@ const getModelName = () => process.env.OPENAI_MODEL || "gpt-4o-mini";
 const SERPER_API_KEY = () => process.env.SERPER_API_KEY || "";
 const KEYWORD_COOLDOWN_MS = Number(process.env.KEYWORD_COOLDOWN_MS || 2500);
 const LOAD_BACKOFF_MS = Number(process.env.LOAD_BACKOFF_MS || 8000);
+const MAX_COMPETITOR_URLS = Math.max(1, Number(process.env.MAX_COMPETITOR_URLS || 3));
+const FAST_MODE = (process.env.BRIEF_FAST_MODE || "true").toLowerCase() !== "false";
+const ENABLE_GOOGLE_DOC = (process.env.ENABLE_GOOGLE_DOC || "false").toLowerCase() === "true";
 
 
 type SendEvent = (event: ProgressEvent) => void;
@@ -500,20 +503,6 @@ function renderStructuredBrief(
 COUNTRY / REGION: ${country || "Not specified"}
 
 ===================================
-BRIEF SNAPSHOT
-===================================
-Search Intent: ${brief.search_intent}
-Recommended Angle: ${brief.search_angle}
-Article Type: ${brief.article_type}
-Page Goal: ${brief.page_goal}
-Target Persona: ${brief.target_persona}
-Word Count Range: ${brief.word_count_range}
-Page Format: ${brief.page_format}
-
-Summary:
-${brief.brief_summary}
-
-===================================
 PAGE TITLE OPTIONS
 ===================================
 ${brief.title_options.map((title, index) => `${index + 1}. ${title}`).join("\n")}
@@ -522,6 +511,9 @@ ${brief.title_options.map((title, index) => `${index + 1}. ${title}`).join("\n")
 OUTLINE & WRITER INSTRUCTIONS
 ===================================
 H1: ${brief.h1}
+Search Angle: ${brief.search_angle}
+Target Reader: ${brief.target_persona}
+Word Count Range: ${brief.word_count_range}
 
 ${sectionBlocks}
 
@@ -539,34 +531,6 @@ ${renderBullets(brief.comparison_points)}
 FAQS
 ===================================
 ${brief.faq_questions.map((question, index) => `${index + 1}. ${question}`).join("\n")}
-
-===================================
-TECHNICAL SEO ELEMENTS
-===================================
-Meta Description Options:
-${brief.meta_descriptions.map((description, index) => `${index + 1}. ${description}`).join("\n")}
-
-URL Structure: ${brief.url_slug}
-
-Keyword Clusters:
-- Primary: ${keyword}
-- Secondary: ${brief.secondary_keywords.join(", ") || "None specified"}
-- Long-tail: ${brief.long_tail_keywords.join(", ") || "None specified"}
-
-Entity Recommendations:
-${renderBullets(brief.entities)}
-
-Semantic Search Terms:
-${renderBullets(brief.semantic_terms)}
-
-Internal Links:
-${renderBullets(brief.internal_links)}
-
-External Linking Strategy:
-${renderBullets(brief.external_linking_strategy)}
-
-Media Ideas:
-${renderBullets(brief.media_ideas)}
 
 ===================================
 COMPETITOR REFERENCES
@@ -973,6 +937,35 @@ async function scrapeWebsite(url: string): Promise<string> {
   } catch {
     return "Content not available";
   }
+}
+
+function extractHeuristicInsightFromContent(content: string, sourceUrl: string): CompetitorInsight {
+  const lines = content.split("\n").map((line) => line.trim()).filter(Boolean);
+  const pageTitleLine = lines.find((line) => line.startsWith("PAGE TITLE:"));
+  const pageTitle = pageTitleLine ? pageTitleLine.replace("PAGE TITLE:", "").trim() : sourceUrl;
+  const headings = lines.filter((line) => /^H[1-3]:\s+/i.test(line)).slice(0, 20);
+  const listItemLines = (() => {
+    const start = lines.findIndex((line) => line === "LIST ITEMS:");
+    if (start === -1) return [] as string[];
+    return lines.slice(start + 1, start + 25).filter((line) => line.length > 3);
+  })();
+  return {
+    source_url: sourceUrl,
+    page_title: pageTitle,
+    content_format: listItemLines.length ? "listicle" : "article",
+    estimated_word_count: Math.max(0, Math.floor(content.length / 6)),
+    headings,
+    common_themes: headings.map((line) => line.replace(/^H[1-3]:\s+/i, "")).slice(0, 8),
+    unique_angles: [],
+    notable_features: listItemLines.length ? ["list items"] : [],
+    named_entities: listItemLines.slice(0, 12),
+    factual_attributes: [],
+    locale_signals: [],
+    item_candidates: listItemLines.slice(0, 15),
+    faq_candidates: [],
+    pricing_mentions: [],
+    comparison_dimensions: [],
+  };
 }
 
 async function openaiExtractCompetitorInsight(
@@ -2067,12 +2060,16 @@ export async function processSingleKeyword(
     total: total,
   });
   let intentProfile: IntentProfile;
-  try {
-    intentProfile = await openaiClassifyIntent(keyword, country, keywordSignals, searchResults);
-  } catch (error) {
-    log(`Intent classification fallback for "${keyword}": ${error}`, "workflow");
-    await delay(LOAD_BACKOFF_MS);
+  if (FAST_MODE) {
     intentProfile = buildFallbackIntentProfile(keywordSignals);
+  } else {
+    try {
+      intentProfile = await openaiClassifyIntent(keyword, country, keywordSignals, searchResults);
+    } catch (error) {
+      log(`Intent classification fallback for "${keyword}": ${error}`, "workflow");
+      await delay(LOAD_BACKOFF_MS);
+      intentProfile = buildFallbackIntentProfile(keywordSignals);
+    }
   }
 
   sendEvent({ type: "filtering", keyword, message: `Filtering search results for "${keyword}"...`, current: index + 1, total: total });
@@ -2081,10 +2078,12 @@ export async function processSingleKeyword(
   sendEvent({ type: "filtering", keyword, message: `Selecting the best competitor URLs for "${keyword}"...`, current: index + 1, total: total });
   let topUrls: SearchResult[];
   try {
-    topUrls = await openaiFilterTopUrls(filtered_results, keyword);
+    topUrls = FAST_MODE
+      ? filtered_results.slice(0, MAX_COMPETITOR_URLS)
+      : await openaiFilterTopUrls(filtered_results, keyword);
   } catch (error) {
     log(`URL selection fallback for "${keyword}": ${error}`, "workflow");
-    topUrls = filtered_results.slice(0, 5);
+    topUrls = filtered_results.slice(0, MAX_COMPETITOR_URLS);
   }
 
   const limit = pLimit(2);
@@ -2108,6 +2107,11 @@ export async function processSingleKeyword(
         total: total,
       });
 
+      if (FAST_MODE) {
+        const heuristic = extractHeuristicInsightFromContent(content, url.link);
+        if (country) heuristic.locale_signals = [country];
+        return heuristic;
+      }
       try {
         return await openaiExtractCompetitorInsight(content, url.link, keyword, country, intentProfile);
       } catch (error) {
@@ -2147,19 +2151,23 @@ export async function processSingleKeyword(
   });
 
   let blueprint: BriefBlueprint;
-  try {
-    blueprint = await openaiBuildBriefBlueprint(
-      keyword,
-      country,
-      keywordSignals,
-      intentProfile,
-      topUrls,
-      serpInsights
-    );
-  } catch (error) {
-    log(`Blueprint fallback for "${keyword}": ${error}`, "workflow");
-    await delay(LOAD_BACKOFF_MS);
+  if (FAST_MODE) {
     blueprint = buildFallbackBlueprint(keyword, country, keywordSignals, intentProfile, serpInsights);
+  } else {
+    try {
+      blueprint = await openaiBuildBriefBlueprint(
+        keyword,
+        country,
+        keywordSignals,
+        intentProfile,
+        topUrls,
+        serpInsights
+      );
+    } catch (error) {
+      log(`Blueprint fallback for "${keyword}": ${error}`, "workflow");
+      await delay(LOAD_BACKOFF_MS);
+      blueprint = buildFallbackBlueprint(keyword, country, keywordSignals, intentProfile, serpInsights);
+    }
   }
 
   sendEvent({
@@ -2170,20 +2178,24 @@ export async function processSingleKeyword(
     total: total,
   });
   let outlinePlan: OutlinePlan;
-  try {
-    outlinePlan = await openaiBuildOutlinePlan(
-      keyword,
-      country,
-      keywordSignals,
-      intentProfile,
-      blueprint,
-      serpInsights,
-      entityEnrichment
-    );
-  } catch (error) {
-    log(`Outline fallback for "${keyword}": ${error}`, "workflow");
-    await delay(LOAD_BACKOFF_MS);
+  if (FAST_MODE) {
     outlinePlan = buildFallbackOutlinePlan(keyword, keywordSignals, blueprint, entityEnrichment);
+  } else {
+    try {
+      outlinePlan = await openaiBuildOutlinePlan(
+        keyword,
+        country,
+        keywordSignals,
+        intentProfile,
+        blueprint,
+        serpInsights,
+        entityEnrichment
+      );
+    } catch (error) {
+      log(`Outline fallback for "${keyword}": ${error}`, "workflow");
+      await delay(LOAD_BACKOFF_MS);
+      outlinePlan = buildFallbackOutlinePlan(keyword, keywordSignals, blueprint, entityEnrichment);
+    }
   }
 
   sendEvent({
@@ -2221,7 +2233,7 @@ export async function processSingleKeyword(
     );
   }
   const qualityReport = evaluateBriefQuality(structuredBrief, keywordSignals, intentProfile, serpInsights);
-  if (qualityReport.needsRepair) {
+  if (!FAST_MODE && qualityReport.needsRepair) {
     sendEvent({
       type: "generating",
       keyword,
@@ -2252,15 +2264,17 @@ export async function processSingleKeyword(
   const finalBrief = `${briefContent}\n\n---\nGenerated: ${timestamp}\n`;
 
   let googleDocUrl: string | undefined;
-  try {
-    sendEvent({ type: "generating", keyword, message: "Creating Google Doc...", current: index + 1, total: total });
-    googleDocUrl = await createGoogleDoc(keyword, finalBrief);
-    
-    if (sheetUrl) {
-      await writeBackToSheet(sheetUrl, rowIndex, googleDocUrl);
+  if (ENABLE_GOOGLE_DOC) {
+    try {
+      sendEvent({ type: "generating", keyword, message: "Creating Google Doc...", current: index + 1, total: total });
+      googleDocUrl = await createGoogleDoc(keyword, finalBrief);
+      
+      if (sheetUrl) {
+        await writeBackToSheet(sheetUrl, rowIndex, googleDocUrl);
+      }
+    } catch (error) {
+      log(`Warning: Google Doc creation or write back failed: ${error}`, "workflow");
     }
-  } catch (error) {
-    log(`Warning: Google Doc creation or write back failed: ${error}`, "workflow");
   }
 
   sendEvent({
