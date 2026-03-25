@@ -909,7 +909,7 @@ Rules:
 - For informational/how-to keywords, include process depth, examples, mistakes, and implementation details.
 - Do not add filler sections like "How to choose" unless they are strongly supported by the SERP.
 - The sections array must contain substantive, unique sections with detailed writer guidance.
-- Each section must have strong `must_cover` and `research_needed` arrays.
+- Each section must have strong "must_cover" and "research_needed" arrays.
 - Use competitor URLs as examples where useful.
 
 Return JSON with this exact shape:
