@@ -307,8 +307,113 @@ interface DraftBriefSection {
   }>;
 }
 
+interface IntentProfile {
+  keywordType: string;
+  inferredIntent: string;
+  articleFormat: string;
+  primarySubject: string;
+  audience: string;
+  freshnessExpectation: string;
+  needsEntityLevelCoverage: boolean;
+  needsItemByItemCoverage: boolean;
+  targetItemCount: number;
+  mandatoryCoverage: string[];
+  preferredSectionPatterns: string[];
+  avoidedPatterns: string[];
+  qualityTargets: string[];
+}
+
+interface CompetitorInsight {
+  source_url: string;
+  page_title: string;
+  content_format: string;
+  estimated_word_count: number;
+  headings: string[];
+  common_themes: string[];
+  unique_angles: string[];
+  notable_features: string[];
+  named_entities: string[];
+  factual_attributes: string[];
+  locale_signals: string[];
+  item_candidates: string[];
+  faq_candidates: string[];
+  pricing_mentions: string[];
+  comparison_dimensions: string[];
+}
+
+interface AggregatedSerpInsights {
+  topHeadings: string[];
+  recurringThemes: string[];
+  recurringEntities: string[];
+  recurringAttributes: string[];
+  recurringFaqs: string[];
+  itemCandidates: string[];
+  pricingSignals: string[];
+  comparisonDimensions: string[];
+  localeSignals: string[];
+  contentFormats: string[];
+  opportunities: string[];
+  examplesByUrl: Array<{
+    url: string;
+    title: string;
+    winning_angles: string[];
+    entities: string[];
+    attributes: string[];
+  }>;
+}
+
+interface EntityEnrichment {
+  entityType: string;
+  profiles: Array<{
+    name: string;
+    whyItMatters: string;
+    mustCover: string[];
+  }>;
+}
+
+interface OutlinePlan {
+  h1: string;
+  titleAngles: string[];
+  sections: DraftBriefSection[];
+  comparisonPoints: string[];
+  faqQuestions: string[];
+  itemTemplate: string[];
+  opportunities: string[];
+}
+
+interface BriefQualityReport {
+  score: number;
+  issues: string[];
+  strengths: string[];
+  needsRepair: boolean;
+}
+
 function safeStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
+}
+
+function dedupeStrings(items: Array<string | undefined | null>, limit = 50): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of items) {
+    const normalized = String(item || "").trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function safeNumber(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function compactJson<T>(value: T): string {
+  return JSON.stringify(value, null, 2);
 }
 
 function renderBullets(items: string[], emptyText = "None specified"): string {
@@ -569,6 +674,82 @@ function deriveKeywordSignals(keyword: string, country?: string): KeywordSignals
   };
 }
 
+async function openaiClassifyIntent(
+  keyword: string,
+  country: string | undefined,
+  keywordSignals: KeywordSignals,
+  searchResults: SearchResult[]
+): Promise<IntentProfile> {
+  const prompt = `You are classifying a content-brief keyword before planning the brief.
+
+KEYWORD: ${keyword}
+COUNTRY / REGION: ${country || "Not specified"}
+HEURISTIC SIGNALS:
+${compactJson(keywordSignals)}
+
+TOP SERP RESULTS:
+${formatSearchResults(searchResults.slice(0, 5))}
+
+TASK:
+Return a JSON object that sharpens the keyword classification.
+
+Rules:
+- Keep the brief aligned to the actual SERP, not a reusable template.
+- If the keyword is a ranked/local/tool query, say so explicitly.
+- If the keyword needs entity-level coverage, set needsEntityLevelCoverage=true.
+- If the keyword needs item-by-item coverage, set needsItemByItemCoverage=true.
+- For "best/top tools" keywords, require tool-by-tool depth.
+- For restaurant/hotel/local venue ranked keywords, require one ranked item subsection per entity.
+
+Return JSON with this shape:
+{
+  "keywordType": "...",
+  "inferredIntent": "...",
+  "articleFormat": "...",
+  "primarySubject": "...",
+  "audience": "...",
+  "freshnessExpectation": "...",
+  "needsEntityLevelCoverage": true,
+  "needsItemByItemCoverage": true,
+  "targetItemCount": 10,
+  "mandatoryCoverage": ["..."],
+  "preferredSectionPatterns": ["..."],
+  "avoidedPatterns": ["..."],
+  "qualityTargets": ["..."]
+}`;
+
+  return withRetry(async () => {
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+    });
+
+    const content = response.choices[0].message.content || "{}";
+    const parsed = JSON.parse(content) as Partial<IntentProfile>;
+    return {
+      keywordType: String(parsed.keywordType || keywordSignals.keywordType),
+      inferredIntent: String(parsed.inferredIntent || keywordSignals.inferredIntent),
+      articleFormat: String(parsed.articleFormat || keywordSignals.articleFormat),
+      primarySubject: String(parsed.primarySubject || keywordSignals.primarySubject),
+      audience: String(parsed.audience || "Searchers who want an intent-matched, practical brief."),
+      freshnessExpectation: String(parsed.freshnessExpectation || "Current information aligned to the live SERP."),
+      needsEntityLevelCoverage: Boolean(parsed.needsEntityLevelCoverage ?? keywordSignals.primarySubject === "venues" || keywordSignals.primarySubject === "tools"),
+      needsItemByItemCoverage: Boolean(parsed.needsItemByItemCoverage ?? Boolean(keywordSignals.listCount) || keywordSignals.primarySubject === "tools"),
+      targetItemCount: safeNumber(parsed.targetItemCount, keywordSignals.listCount || (keywordSignals.primarySubject === "tools" ? 8 : 0)),
+      mandatoryCoverage: dedupeStrings([...(parsed.mandatoryCoverage || []), ...keywordSignals.mandatorySections], 20),
+      preferredSectionPatterns: dedupeStrings([...(parsed.preferredSectionPatterns || []), ...keywordSignals.sectionPatterns], 20),
+      avoidedPatterns: dedupeStrings(parsed.avoidedPatterns || [], 20),
+      qualityTargets: dedupeStrings([
+        ...(parsed.qualityTargets || []),
+        "Match real SERP intent",
+        "Avoid generic repeated sections",
+        "Include enough depth for each major entity or item",
+      ], 20),
+    };
+  });
+}
+
 function formatSearchResults(results: SearchResult[]): string {
   return results.map((result) => {
     return [
@@ -676,13 +857,15 @@ Exclude any URLs that:
 - Are from social media, forums, or review sites
 - Are too general or not specific to the keyword
 
-Return ONLY a JSON array with this exact structure:
-[
-  {"title": "...", "link": "...", "snippet": "..."},
-  {"title": "...", "link": "...", "snippet": "..."}
-]
+Return ONLY a JSON object with this exact structure:
+{
+  "urls": [
+    {"title": "...", "link": "...", "snippet": "..."},
+    {"title": "...", "link": "...", "snippet": "..."}
+  ]
+}
 
-No other text or explanation. Just the JSON array.`;
+No other text or explanation.`;
 
   return withRetry(async () => {
     const response = await openai.chat.completions.create({
@@ -691,7 +874,7 @@ No other text or explanation. Just the JSON array.`;
       response_format: { type: "json_object" },
     });
 
-    let contentText = response.choices[0].message.content || "[]";
+    const contentText = response.choices[0].message.content || "{}";
     
     try {
       const parsed = JSON.parse(contentText);
@@ -726,6 +909,11 @@ async function scrapeWebsite(url: string): Promise<string> {
       .map(([, level, content]) => `H${level}: ${normalizeWhitespace(content.replace(/<[^>]+>/g, " "))}`)
       .filter(Boolean)
       .join("\n");
+    const listItems = Array.from(html.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi))
+      .slice(0, 40)
+      .map(([, content]) => normalizeWhitespace(content.replace(/<[^>]+>/g, " ")))
+      .filter((item) => item.length > 2)
+      .join("\n");
 
     const text = html
       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
@@ -745,6 +933,7 @@ async function scrapeWebsite(url: string): Promise<string> {
     return [
       title ? `PAGE TITLE: ${normalizeWhitespace(title)}` : "",
       headings ? `HEADINGS:\n${headings}` : "",
+      listItems ? `LIST ITEMS:\n${listItems}` : "",
       `BODY:\n${text.substring(0, 14000)}`,
     ].filter(Boolean).join("\n\n");
   } catch {
@@ -752,60 +941,188 @@ async function scrapeWebsite(url: string): Promise<string> {
   }
 }
 
-async function openaiSummarizeContent(content: string, sourceUrl: string, keyword: string, country?: string): Promise<string> {
+async function openaiExtractCompetitorInsight(
+  content: string,
+  sourceUrl: string,
+  keyword: string,
+  country: string | undefined,
+  intentProfile: IntentProfile
+): Promise<CompetitorInsight> {
   const prompt = `WEBPAGE CONTENT:
 
 ${content}
 
 SOURCE URL: ${sourceUrl}
-
 KEYWORD: ${keyword}
 COUNTRY / REGION: ${country || "Not specified"}
+INTENT PROFILE:
+${compactJson(intentProfile)}
 
-TASK: Analyze this webpage and extract:
-1. Main heading structure (H1, H2, H3)
-2. Key topics covered
-3. Word count estimate
-4. Unique angles or approaches
-5. Content format (guide, listicle, article, etc.)
-6. Notable features (FAQs, tables, examples, etc.)
-7. Named entities, places, brands, products, or venues explicitly mentioned
-8. Specific factual attributes that a writer would need to include to satisfy search intent
-9. How localized the page is and whether it reflects the target geography
+TASK:
+Extract structured competitor intelligence from this page for content-brief generation.
 
-Focus ONLY on content relevant to '${keyword}'. Strip away navigation, ads, footers.
+Rules:
+- Focus only on information relevant to the keyword.
+- Pull out real entities, concrete attributes, and section patterns.
+- If this is a list query, capture ranked items or examples explicitly mentioned.
+- If this is a tools query, capture tools, pricing, use cases, and comparison angles.
+- If this is a local/venue query, capture places, menu/signature items when present, locations, and visit/booking details.
+- Keep arrays concise and specific.
 
-Provide detailed summary with source URL at the end:
-Source: ${sourceUrl}`;
+Return JSON with this shape:
+{
+  "source_url": "${sourceUrl}",
+  "page_title": "...",
+  "content_format": "...",
+  "estimated_word_count": 1200,
+  "headings": ["H1: ...", "H2: ..."],
+  "common_themes": ["..."],
+  "unique_angles": ["..."],
+  "notable_features": ["..."],
+  "named_entities": ["..."],
+  "factual_attributes": ["..."],
+  "locale_signals": ["..."],
+  "item_candidates": ["..."],
+  "faq_candidates": ["..."],
+  "pricing_mentions": ["..."],
+  "comparison_dimensions": ["..."]
+}`;
 
   return withRetry(async () => {
     const response = await openai.chat.completions.create({
       model: getModelName(),
       messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
     });
-    return response.choices[0].message.content || "";
+
+    const raw = response.choices[0].message.content || "{}";
+    const parsed = JSON.parse(raw) as Partial<CompetitorInsight>;
+    return {
+      source_url: sourceUrl,
+      page_title: String(parsed.page_title || ""),
+      content_format: String(parsed.content_format || ""),
+      estimated_word_count: safeNumber(parsed.estimated_word_count),
+      headings: safeStringArray(parsed.headings),
+      common_themes: safeStringArray(parsed.common_themes),
+      unique_angles: safeStringArray(parsed.unique_angles),
+      notable_features: safeStringArray(parsed.notable_features),
+      named_entities: safeStringArray(parsed.named_entities),
+      factual_attributes: safeStringArray(parsed.factual_attributes),
+      locale_signals: safeStringArray(parsed.locale_signals),
+      item_candidates: safeStringArray(parsed.item_candidates),
+      faq_candidates: safeStringArray(parsed.faq_candidates),
+      pricing_mentions: safeStringArray(parsed.pricing_mentions),
+      comparison_dimensions: safeStringArray(parsed.comparison_dimensions),
+    };
   });
+}
+
+function aggregateCompetitorInsights(insights: CompetitorInsight[]): AggregatedSerpInsights {
+  const topHeadings = dedupeStrings(insights.flatMap((insight) => insight.headings), 30);
+  const recurringThemes = dedupeStrings(insights.flatMap((insight) => insight.common_themes), 25);
+  const recurringEntities = dedupeStrings(insights.flatMap((insight) => insight.named_entities), 40);
+  const recurringAttributes = dedupeStrings(insights.flatMap((insight) => insight.factual_attributes), 40);
+  const recurringFaqs = dedupeStrings(insights.flatMap((insight) => insight.faq_candidates), 12);
+  const itemCandidates = dedupeStrings(insights.flatMap((insight) => insight.item_candidates), 30);
+  const pricingSignals = dedupeStrings(insights.flatMap((insight) => insight.pricing_mentions), 20);
+  const comparisonDimensions = dedupeStrings(insights.flatMap((insight) => insight.comparison_dimensions), 20);
+  const localeSignals = dedupeStrings(insights.flatMap((insight) => insight.locale_signals), 20);
+  const contentFormats = dedupeStrings(insights.map((insight) => insight.content_format), 10);
+  const opportunities = dedupeStrings(insights.flatMap((insight) => insight.unique_angles), 20);
+
+  return {
+    topHeadings,
+    recurringThemes,
+    recurringEntities,
+    recurringAttributes,
+    recurringFaqs,
+    itemCandidates,
+    pricingSignals,
+    comparisonDimensions,
+    localeSignals,
+    contentFormats,
+    opportunities,
+    examplesByUrl: insights.map((insight) => ({
+      url: insight.source_url,
+      title: insight.page_title || insight.source_url,
+      winning_angles: insight.unique_angles.slice(0, 3),
+      entities: insight.named_entities.slice(0, 5),
+      attributes: insight.factual_attributes.slice(0, 5),
+    })),
+  };
+}
+
+function buildEntityEnrichment(
+  keywordSignals: KeywordSignals,
+  intentProfile: IntentProfile,
+  serpInsights: AggregatedSerpInsights
+): EntityEnrichment {
+  const entityType = intentProfile.primarySubject === "tools"
+    ? "tool"
+    : intentProfile.primarySubject === "venues"
+      ? "venue"
+      : "entity";
+
+  const baseMustCover = intentProfile.primarySubject === "tools"
+    ? [
+        "what it is",
+        "how the target audience uses it",
+        "top strengths",
+        "main weaknesses",
+        "free plan",
+        "paid plans",
+        "best alternatives",
+      ]
+    : intentProfile.primarySubject === "venues"
+      ? [
+          "location",
+          "signature offering",
+          "price range",
+          "experience or ambiance",
+          "why it stands out",
+          "who it suits",
+          "booking or visit notes",
+        ]
+      : keywordSignals.itemDetailRequirements;
+
+  const names = dedupeStrings([
+    ...serpInsights.itemCandidates,
+    ...serpInsights.recurringEntities,
+  ], Math.max(6, intentProfile.targetItemCount || 10));
+
+  return {
+    entityType,
+    profiles: names.map((name) => ({
+      name,
+      whyItMatters: `Mentioned or implied by the target SERP as a relevant ${entityType}.`,
+      mustCover: baseMustCover,
+    })),
+  };
 }
 
 async function openaiBuildBriefBlueprint(
   keyword: string,
   country: string | undefined,
   keywordSignals: KeywordSignals,
+  intentProfile: IntentProfile,
   searchResults: SearchResult[],
-  competitorAnalysis: string
+  serpInsights: AggregatedSerpInsights
 ): Promise<BriefBlueprint> {
   const prompt = `You are an expert SEO strategist building a structured content brief plan.
 
 KEYWORD: ${keyword}
 COUNTRY / REGION: ${country || "Not specified"}
 LOCAL KEYWORD SIGNALS:
-${JSON.stringify(keywordSignals, null, 2)}
+${compactJson(keywordSignals)}
+
+INTENT PROFILE:
+${compactJson(intentProfile)}
 
 TOP SERP RESULTS:
 ${formatSearchResults(searchResults)}
 
-COMPETITOR ANALYSIS:
-${competitorAnalysis}
+AGGREGATED SERP INSIGHTS:
+${compactJson(serpInsights)}
 
 TASK:
 Return a JSON object that adapts the brief to the keyword's real intent and locale. Do not create a generic template.
@@ -889,29 +1206,152 @@ Return JSON with this exact top-level shape:
   });
 }
 
+async function openaiBuildOutlinePlan(
+  keyword: string,
+  country: string | undefined,
+  keywordSignals: KeywordSignals,
+  intentProfile: IntentProfile,
+  blueprint: BriefBlueprint,
+  serpInsights: AggregatedSerpInsights,
+  entityEnrichment: EntityEnrichment
+): Promise<OutlinePlan> {
+  const prompt = `You are planning the exact H1/H2/H3 structure for a content brief.
+
+KEYWORD: ${keyword}
+COUNTRY / REGION: ${country || "Not specified"}
+KEYWORD SIGNALS:
+${compactJson(keywordSignals)}
+
+INTENT PROFILE:
+${compactJson(intentProfile)}
+
+BLUEPRINT:
+${compactJson(blueprint)}
+
+SERP INSIGHTS:
+${compactJson(serpInsights)}
+
+ENTITY ENRICHMENT:
+${compactJson(entityEnrichment)}
+
+TASK:
+Return a JSON plan for the actual outline before writer instructions are generated.
+
+Rules:
+- H1/H2/H3 structure is mandatory.
+- Do not create generic filler sections.
+- If this is a tool/list/venue query, the main body must revolve around the actual items.
+- If targetItemCount is available, create enough H3 item subsections to match it when practical.
+- Each section must have a clear purpose and strong must_cover checklist.
+- Use concrete entities from SERP insights where possible.
+
+Return JSON:
+{
+  "h1": "...",
+  "titleAngles": ["...", "...", "..."],
+  "sections": [
+    {
+      "level": "H2",
+      "heading": "...",
+      "purpose": "...",
+      "section_type": "...",
+      "must_cover": ["..."],
+      "research_needed": ["..."],
+      "differentiation": ["..."],
+      "examples": ["..."],
+      "watch_out_for": ["..."],
+      "subsections": [
+        {
+          "heading": "...",
+          "purpose": "...",
+          "must_cover": ["..."]
+        }
+      ]
+    }
+  ],
+  "comparisonPoints": ["..."],
+  "faqQuestions": ["..."],
+  "itemTemplate": ["..."],
+  "opportunities": ["..."]
+}`;
+
+  return withRetry(async () => {
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+    });
+
+    const raw = response.choices[0].message.content || "{}";
+    const parsed = JSON.parse(raw) as any;
+    const sections: DraftBriefSection[] = Array.isArray(parsed.sections)
+      ? parsed.sections.map((section: any) => ({
+          level: section?.level === "H3" ? "H3" : "H2",
+          heading: String(section?.heading || "").trim(),
+          purpose: String(section?.purpose || "").trim(),
+          section_type: String(section?.section_type || "core").trim(),
+          must_cover: safeStringArray(section?.must_cover),
+          research_needed: safeStringArray(section?.research_needed),
+          differentiation: safeStringArray(section?.differentiation),
+          examples: safeStringArray(section?.examples),
+          watch_out_for: safeStringArray(section?.watch_out_for),
+          subsections: Array.isArray(section?.subsections)
+            ? section.subsections.map((subsection: any) => ({
+                heading: String(subsection?.heading || "").trim(),
+                purpose: String(subsection?.purpose || "").trim(),
+                must_cover: safeStringArray(subsection?.must_cover),
+              })).filter((subsection: any) => subsection.heading)
+            : [],
+        })).filter((section: DraftBriefSection) => section.heading)
+      : [];
+
+    return {
+      h1: String(parsed.h1 || keyword),
+      titleAngles: safeStringArray(parsed.titleAngles).slice(0, 3),
+      sections,
+      comparisonPoints: safeStringArray(parsed.comparisonPoints),
+      faqQuestions: safeStringArray(parsed.faqQuestions),
+      itemTemplate: safeStringArray(parsed.itemTemplate),
+      opportunities: safeStringArray(parsed.opportunities),
+    };
+  });
+}
+
 async function openaiGenerateStructuredBrief(
   keyword: string,
   country: string | undefined,
   keywordSignals: KeywordSignals,
+  intentProfile: IntentProfile,
   blueprint: BriefBlueprint,
+  outlinePlan: OutlinePlan,
   searchResults: SearchResult[],
-  competitorAnalysis: string
+  serpInsights: AggregatedSerpInsights,
+  entityEnrichment: EntityEnrichment
 ): Promise<StructuredBrief> {
   const prompt = `You are Britta, an expert content strategist AI that creates detailed content briefs.
 
 KEYWORD: ${keyword}
 COUNTRY / REGION: ${country || "Not specified"}
 KEYWORD SIGNALS:
-${JSON.stringify(keywordSignals, null, 2)}
+${compactJson(keywordSignals)}
+
+INTENT PROFILE:
+${compactJson(intentProfile)}
 
 BRIEF BLUEPRINT:
-${JSON.stringify(blueprint, null, 2)}
+${compactJson(blueprint)}
+
+OUTLINE PLAN:
+${compactJson(outlinePlan)}
 
 TOP SERP RESULTS:
 ${formatSearchResults(searchResults)}
 
-COMPETITOR ANALYSIS:
-${competitorAnalysis}
+AGGREGATED SERP INSIGHTS:
+${compactJson(serpInsights)}
+
+ENTITY ENRICHMENT:
+${compactJson(entityEnrichment)}
 
 TASK:
 Return a JSON object for a deep, keyword-specific content brief. Do not return prose outside JSON.
@@ -1032,10 +1472,18 @@ Return JSON with this exact shape:
         differentiation: ["include clear student use cases and pricing context for each tool"],
         examples: [],
         watch_out_for: ["listing tools without explaining how students use them"],
-        subsections: (blueprint.recommendedH2s[0]?.h3s || []).slice(0, keywordSignals.listCount || 8).map((heading) => ({
-          heading,
-          purpose: "Break down one tool in depth.",
-          must_cover: keywordSignals.itemDetailRequirements,
+        subsections: (
+          outlinePlan.sections.find((section) => section.subsections.length)?.subsections.length
+            ? outlinePlan.sections.find((section) => section.subsections.length)!.subsections
+            : entityEnrichment.profiles.map((profile) => ({
+                heading: profile.name,
+                purpose: `Break down ${profile.name} in depth for the target audience.`,
+                must_cover: profile.mustCover,
+              }))
+        ).slice(0, keywordSignals.listCount || intentProfile.targetItemCount || 8).map((subsection) => ({
+          heading: subsection.heading,
+          purpose: subsection.purpose || "Break down one tool in depth.",
+          must_cover: subsection.must_cover.length ? subsection.must_cover : keywordSignals.itemDetailRequirements,
         })),
       },
       {
@@ -1097,22 +1545,41 @@ Return JSON with this exact shape:
         differentiation: ["each venue entry should feel like a mini-review, not just a mention"],
         examples: [],
         watch_out_for: ["listing names without enough venue-specific detail"],
-        subsections: buildRankedItemHeadings(keyword, keywordSignals.listCount || 10, "Restaurant").map((heading) => ({
-          heading,
-          purpose: "Provide a deep venue-by-venue breakdown.",
-          must_cover: [
-            "actual restaurant name",
-            "city or location",
-            "cuisine style",
-            "signature dishes or tasting menu highlights",
-            "pricing or price range",
-            "ambiance and dining experience",
-            "why it stands out",
-            "who it is best for",
-            "drawbacks or considerations",
-            "reservation or booking notes",
-          ],
-        })),
+        subsections: (
+          entityEnrichment.profiles.length
+            ? entityEnrichment.profiles.map((profile) => ({
+                heading: profile.name,
+                purpose: `Provide a deep venue-by-venue breakdown for ${profile.name}.`,
+                must_cover: profile.mustCover.length ? profile.mustCover : [
+                  "actual restaurant name",
+                  "city or location",
+                  "cuisine style",
+                  "signature dishes or tasting menu highlights",
+                  "pricing or price range",
+                  "ambiance and dining experience",
+                  "why it stands out",
+                  "who it is best for",
+                  "drawbacks or considerations",
+                  "reservation or booking notes",
+                ],
+              }))
+            : buildRankedItemHeadings(keyword, keywordSignals.listCount || 10, "Restaurant").map((heading) => ({
+                heading,
+                purpose: "Provide a deep venue-by-venue breakdown.",
+                must_cover: [
+                  "actual restaurant name",
+                  "city or location",
+                  "cuisine style",
+                  "signature dishes or tasting menu highlights",
+                  "pricing or price range",
+                  "ambiance and dining experience",
+                  "why it stands out",
+                  "who it is best for",
+                  "drawbacks or considerations",
+                  "reservation or booking notes",
+                ],
+              }))
+        ),
       },
       {
         level: "H2" as const,
@@ -1139,7 +1606,7 @@ Return JSON with this exact shape:
         subsections: [],
       },
     ] : [];
-    const fallbackSections: DraftBriefSection[] = blueprint.recommendedH2s.map((section) => ({
+    const fallbackSections: DraftBriefSection[] = (outlinePlan.sections.length ? outlinePlan.sections : blueprint.recommendedH2s.map((section) => ({
       level: "H2" as const,
       heading: section.heading,
       purpose: section.purpose,
@@ -1154,7 +1621,7 @@ Return JSON with this exact shape:
         purpose: `Support the section "${section.heading}" with a specific angle.`,
         must_cover: section.keyPoints,
       })),
-    }));
+    })));
     const parsedSections: DraftBriefSection[] = Array.isArray(parsed.sections) ? parsed.sections.map((section: any) => ({
       level: section?.level === "H3" ? "H3" : "H2",
       heading: String(section?.heading || "").trim(),
@@ -1191,14 +1658,18 @@ Return JSON with this exact shape:
       brief_summary: parsed.brief_summary || `Create a more detailed, intent-matched article for ${keyword}.`,
       title_options: safeStringArray(parsed.title_options).slice(0, 3).length
         ? safeStringArray(parsed.title_options).slice(0, 3)
-        : blueprint.suggestedTitleAngles.slice(0, 3),
-      h1: parsed.h1 || keyword,
+        : (outlinePlan.titleAngles.length ? outlinePlan.titleAngles : blueprint.suggestedTitleAngles).slice(0, 3),
+      h1: parsed.h1 || outlinePlan.h1 || keyword,
       sections: finalSections,
       item_template: safeStringArray(parsed.item_template).length
         ? safeStringArray(parsed.item_template)
-        : keywordSignals.itemDetailRequirements,
-      comparison_points: safeStringArray(parsed.comparison_points),
-      faq_questions: safeStringArray(parsed.faq_questions).slice(0, 8),
+        : (outlinePlan.itemTemplate.length ? outlinePlan.itemTemplate : keywordSignals.itemDetailRequirements),
+      comparison_points: safeStringArray(parsed.comparison_points).length
+        ? safeStringArray(parsed.comparison_points)
+        : outlinePlan.comparisonPoints,
+      faq_questions: safeStringArray(parsed.faq_questions).slice(0, 8).length
+        ? safeStringArray(parsed.faq_questions).slice(0, 8)
+        : outlinePlan.faqQuestions.slice(0, 8),
       word_count_range: String(parsed.word_count_range || blueprint.wordCountRange),
       page_goal: String(parsed.page_goal || blueprint.pageGoal),
       target_persona: String(parsed.target_persona || blueprint.persona),
@@ -1207,12 +1678,16 @@ Return JSON with this exact shape:
       url_slug: String(parsed.url_slug || `/${keyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`),
       secondary_keywords: safeStringArray(parsed.secondary_keywords),
       long_tail_keywords: safeStringArray(parsed.long_tail_keywords),
-      entities: safeStringArray(parsed.entities),
-      semantic_terms: safeStringArray(parsed.semantic_terms),
+      entities: safeStringArray(parsed.entities).length ? safeStringArray(parsed.entities) : serpInsights.recurringEntities,
+      semantic_terms: safeStringArray(parsed.semantic_terms).length ? safeStringArray(parsed.semantic_terms) : dedupeStrings([
+        ...blueprint.semanticTerms,
+        ...serpInsights.recurringThemes,
+        ...serpInsights.recurringAttributes,
+      ], 25),
       internal_links: safeStringArray(parsed.internal_links),
       external_linking_strategy: safeStringArray(parsed.external_linking_strategy),
       media_ideas: safeStringArray(parsed.media_ideas),
-      content_gaps: safeStringArray(parsed.content_gaps),
+      content_gaps: safeStringArray(parsed.content_gaps).length ? safeStringArray(parsed.content_gaps) : outlinePlan.opportunities,
       competitor_references: Array.isArray(parsed.competitor_references)
         ? parsed.competitor_references.map((reference: any) => ({
             title: String(reference?.title || "").trim(),
@@ -1224,6 +1699,165 @@ Return JSON with this exact shape:
             url: result.link,
             why_it_matters: result.snippet || "Competing result from the target SERP.",
           })),
+    };
+  });
+}
+
+function evaluateBriefQuality(
+  brief: StructuredBrief,
+  keywordSignals: KeywordSignals,
+  intentProfile: IntentProfile,
+  serpInsights: AggregatedSerpInsights
+): BriefQualityReport {
+  const issues: string[] = [];
+  const strengths: string[] = [];
+  let score = 100;
+
+  if (!brief.h1.trim()) {
+    issues.push("Missing H1.");
+    score -= 20;
+  } else {
+    strengths.push("H1 present.");
+  }
+
+  if (brief.sections.length < 3) {
+    issues.push("Too few H2 sections.");
+    score -= 20;
+  } else {
+    strengths.push("Multiple H2 sections present.");
+  }
+
+  const subsectionCount = brief.sections.reduce((count, section) => count + section.subsections.length, 0);
+  const minimumSubsections = intentProfile.needsItemByItemCoverage
+    ? Math.max(4, intentProfile.targetItemCount || keywordSignals.listCount || 6)
+    : 2;
+  if (subsectionCount < minimumSubsections) {
+    issues.push(`Not enough H3/item-level subsections. Expected at least ${minimumSubsections}, got ${subsectionCount}.`);
+    score -= 25;
+  } else {
+    strengths.push("Enough subsection depth for item-level coverage.");
+  }
+
+  const mustCoverCount = brief.sections.reduce((count, section) => count + section.must_cover.length, 0);
+  if (mustCoverCount < Math.max(10, brief.sections.length * 3)) {
+    issues.push("Writer instructions are still too thin.");
+    score -= 15;
+  } else {
+    strengths.push("Writer guidance has reasonable depth.");
+  }
+
+  const entityHits = brief.entities.filter((entity) =>
+    serpInsights.recurringEntities.some((sourceEntity) => sourceEntity.toLowerCase() === entity.toLowerCase())
+  ).length;
+  if (intentProfile.needsEntityLevelCoverage && entityHits < Math.min(3, serpInsights.recurringEntities.length || 3)) {
+    issues.push("Brief is missing enough real entities from the SERP.");
+    score -= 15;
+  } else if (brief.entities.length) {
+    strengths.push("Entity coverage present.");
+  }
+
+  const genericSectionMatches = brief.sections.filter((section) =>
+    /how to choose|tips|common mistakes|conclusion/i.test(section.heading) &&
+    intentProfile.avoidedPatterns.some((pattern) => section.heading.toLowerCase().includes(pattern.toLowerCase()))
+  ).length;
+  if (genericSectionMatches > 0) {
+    issues.push("Brief still includes generic filler sections.");
+    score -= 10;
+  }
+
+  return {
+    score: Math.max(0, Math.min(100, score)),
+    issues,
+    strengths,
+    needsRepair: issues.length > 0,
+  };
+}
+
+async function openaiRepairStructuredBrief(
+  keyword: string,
+  country: string | undefined,
+  keywordSignals: KeywordSignals,
+  intentProfile: IntentProfile,
+  blueprint: BriefBlueprint,
+  outlinePlan: OutlinePlan,
+  serpInsights: AggregatedSerpInsights,
+  entityEnrichment: EntityEnrichment,
+  currentBrief: StructuredBrief,
+  qualityReport: BriefQualityReport
+): Promise<StructuredBrief> {
+  const prompt = `Repair this content brief so it becomes deeper and more keyword-specific.
+
+KEYWORD: ${keyword}
+COUNTRY / REGION: ${country || "Not specified"}
+KEYWORD SIGNALS:
+${compactJson(keywordSignals)}
+
+INTENT PROFILE:
+${compactJson(intentProfile)}
+
+BLUEPRINT:
+${compactJson(blueprint)}
+
+OUTLINE PLAN:
+${compactJson(outlinePlan)}
+
+SERP INSIGHTS:
+${compactJson(serpInsights)}
+
+ENTITY ENRICHMENT:
+${compactJson(entityEnrichment)}
+
+CURRENT BRIEF:
+${compactJson(currentBrief)}
+
+QUALITY REPORT:
+${compactJson(qualityReport)}
+
+TASK:
+Return a corrected JSON brief using the exact same shape as before.
+
+Repair goals:
+- keep H1/H2/H3 structure
+- deepen must_cover and research_needed
+- add item-by-item subsections where missing
+- replace generic sections with keyword-specific sections
+- include more real entities, pricing signals, attributes, and local/tool-specific details`;
+
+  return withRetry(async () => {
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+    });
+
+    const parsed = JSON.parse(response.choices[0].message.content || "{}") as any;
+    const repairedSections: DraftBriefSection[] = Array.isArray(parsed.sections)
+      ? parsed.sections.map((section: any) => ({
+          level: section?.level === "H3" ? "H3" : "H2",
+          heading: String(section?.heading || "").trim(),
+          purpose: String(section?.purpose || "").trim(),
+          section_type: String(section?.section_type || "core").trim(),
+          must_cover: safeStringArray(section?.must_cover),
+          research_needed: safeStringArray(section?.research_needed),
+          differentiation: safeStringArray(section?.differentiation),
+          examples: safeStringArray(section?.examples),
+          watch_out_for: safeStringArray(section?.watch_out_for),
+          subsections: Array.isArray(section?.subsections)
+            ? section.subsections.map((subsection: any) => ({
+                heading: String(subsection?.heading || "").trim(),
+                purpose: String(subsection?.purpose || "").trim(),
+                must_cover: safeStringArray(subsection?.must_cover),
+              })).filter((subsection: any) => subsection.heading)
+            : [],
+        })).filter((section: DraftBriefSection) => section.heading)
+      : currentBrief.sections;
+    return {
+      ...currentBrief,
+      ...parsed,
+      title_options: safeStringArray((parsed as any).title_options).length ? safeStringArray((parsed as any).title_options) : currentBrief.title_options,
+      entities: safeStringArray((parsed as any).entities).length ? safeStringArray((parsed as any).entities) : currentBrief.entities,
+      semantic_terms: safeStringArray((parsed as any).semantic_terms).length ? safeStringArray((parsed as any).semantic_terms) : currentBrief.semantic_terms,
+      sections: repairedSections,
     };
   });
 }
@@ -1250,6 +1884,15 @@ export async function processSingleKeyword(
   sendEvent({ type: "searching", keyword, message: `Searching Google for "${keyword}"...`, current: index + 1, total: total });
   const searchResults = await googleSearch(keyword, country);
 
+  sendEvent({
+    type: "generating",
+    keyword,
+    message: `Classifying search intent and brief type for "${keyword}"...`,
+    current: index + 1,
+    total: total,
+  });
+  const intentProfile = await openaiClassifyIntent(keyword, country, keywordSignals, searchResults);
+
   sendEvent({ type: "filtering", keyword, message: `Filtering search results for "${keyword}"...`, current: index + 1, total: total });
   const { filtered_results } = filterSearchResults(searchResults, keyword);
 
@@ -1257,7 +1900,7 @@ export async function processSingleKeyword(
   const topUrls = await openaiFilterTopUrls(filtered_results, keyword);
 
   const limit = pLimit(2);
-  const summaryPromises = topUrls.map((url, j) =>
+  const insightPromises = topUrls.map((url, j) =>
     limit(async () => {
       sendEvent({
         type: "scraping",
@@ -1272,24 +1915,24 @@ export async function processSingleKeyword(
       sendEvent({
         type: "summarizing",
         keyword,
-        message: `Analyzing content from competitor page ${j + 1}/${topUrls.length}...`,
+        message: `Extracting structured SERP insights from competitor page ${j + 1}/${topUrls.length}...`,
         current: index + 1,
         total: total,
       });
 
-      return openaiSummarizeContent(content, url.link, keyword, country);
+      return openaiExtractCompetitorInsight(content, url.link, keyword, country, intentProfile);
     })
   );
 
-  const summariesResult = await Promise.all(summaryPromises);
-  const summaries = summariesResult.filter(Boolean) as string[];
-
-  const combinedAnalysis = summaries.join("\n\n---\n\n");
+  const insightResults = await Promise.all(insightPromises);
+  const insights = insightResults.filter(Boolean) as CompetitorInsight[];
+  const serpInsights = aggregateCompetitorInsights(insights);
+  const entityEnrichment = buildEntityEnrichment(keywordSignals, intentProfile, serpInsights);
 
   sendEvent({
     type: "generating",
     keyword,
-    message: `Building keyword-specific brief logic for "${keyword}"...`,
+    message: `Building keyword-specific brief blueprint for "${keyword}"...`,
     current: index + 1,
     total: total,
   });
@@ -1298,8 +1941,26 @@ export async function processSingleKeyword(
     keyword,
     country,
     keywordSignals,
+    intentProfile,
     topUrls,
-    combinedAnalysis
+    serpInsights
+  );
+
+  sendEvent({
+    type: "generating",
+    keyword,
+    message: `Planning H1/H2/H3 outline and writer coverage for "${keyword}"...`,
+    current: index + 1,
+    total: total,
+  });
+  const outlinePlan = await openaiBuildOutlinePlan(
+    keyword,
+    country,
+    keywordSignals,
+    intentProfile,
+    blueprint,
+    serpInsights,
+    entityEnrichment
   );
 
   sendEvent({
@@ -1310,14 +1971,39 @@ export async function processSingleKeyword(
     total: total,
   });
 
-  const structuredBrief = await openaiGenerateStructuredBrief(
+  let structuredBrief = await openaiGenerateStructuredBrief(
     keyword,
     country,
     keywordSignals,
+    intentProfile,
     blueprint,
+    outlinePlan,
     topUrls,
-    combinedAnalysis
+    serpInsights,
+    entityEnrichment
   );
+  const qualityReport = evaluateBriefQuality(structuredBrief, keywordSignals, intentProfile, serpInsights);
+  if (qualityReport.needsRepair) {
+    sendEvent({
+      type: "generating",
+      keyword,
+      message: `Improving brief depth and specificity for "${keyword}"...`,
+      current: index + 1,
+      total: total,
+    });
+    structuredBrief = await openaiRepairStructuredBrief(
+      keyword,
+      country,
+      keywordSignals,
+      intentProfile,
+      blueprint,
+      outlinePlan,
+      serpInsights,
+      entityEnrichment,
+      structuredBrief,
+      qualityReport
+    );
+  }
   const briefContent = renderStructuredBrief(keyword, country, structuredBrief);
   const timestamp = new Date().toISOString();
   const finalBrief = `${briefContent}\n\n---\nGenerated: ${timestamp}\n`;
