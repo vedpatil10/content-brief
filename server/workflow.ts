@@ -15,6 +15,8 @@ const openai = new OpenAI({
 const getModelName = () => process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 const SERPER_API_KEY = () => process.env.SERPER_API_KEY || "";
+const KEYWORD_COOLDOWN_MS = Number(process.env.KEYWORD_COOLDOWN_MS || 2500);
+const LOAD_BACKOFF_MS = Number(process.env.LOAD_BACKOFF_MS || 8000);
 
 
 type SendEvent = (event: ProgressEvent) => void;
@@ -1084,6 +1086,173 @@ function aggregateCompetitorInsights(insights: CompetitorInsight[]): AggregatedS
   };
 }
 
+function buildFallbackIntentProfile(keywordSignals: KeywordSignals): IntentProfile {
+  return {
+    keywordType: keywordSignals.keywordType,
+    inferredIntent: keywordSignals.inferredIntent,
+    articleFormat: keywordSignals.articleFormat,
+    primarySubject: keywordSignals.primarySubject,
+    audience: "Searchers looking for a specific, practical content brief.",
+    freshnessExpectation: "Use current SERP-aligned information where possible.",
+    needsEntityLevelCoverage: keywordSignals.primarySubject === "venues" || keywordSignals.primarySubject === "tools",
+    needsItemByItemCoverage: Boolean(keywordSignals.listCount) || keywordSignals.primarySubject === "tools",
+    targetItemCount: keywordSignals.listCount || (keywordSignals.primarySubject === "tools" ? 8 : 0),
+    mandatoryCoverage: [...keywordSignals.mandatorySections],
+    preferredSectionPatterns: [...keywordSignals.sectionPatterns],
+    avoidedPatterns: ["generic filler", "repeated template sections"],
+    qualityTargets: ["specificity", "coverage depth", "intent match"],
+  };
+}
+
+function buildFallbackBlueprint(
+  keyword: string,
+  country: string | undefined,
+  keywordSignals: KeywordSignals,
+  intentProfile: IntentProfile,
+  serpInsights: AggregatedSerpInsights
+): BriefBlueprint {
+  const baseH2s = intentProfile.primarySubject === "tools"
+    ? [
+        {
+          heading: `How We Evaluated ${keyword}`,
+          purpose: "Explain ranking criteria.",
+          keyPoints: ["evaluation criteria", "target audience fit", "pricing", "ease of use"],
+          examples: [],
+          watchOutFor: ["generic criteria"],
+          h3s: [],
+        },
+        {
+          heading: `Best ${keyword}`,
+          purpose: "Make the tools themselves the center of the brief.",
+          keyPoints: keywordSignals.itemDetailRequirements,
+          examples: [],
+          watchOutFor: ["tool names without enough depth"],
+          h3s: serpInsights.itemCandidates.slice(0, keywordSignals.listCount || 8),
+        },
+      ]
+    : [
+        {
+          heading: `Core Coverage for ${keyword}`,
+          purpose: "Match the dominant SERP intent with direct coverage.",
+          keyPoints: keywordSignals.dataPoints,
+          examples: [],
+          watchOutFor: ["generic sections"],
+          h3s: serpInsights.topHeadings.slice(0, 6),
+        },
+      ];
+
+  return {
+    inferredIntent: intentProfile.inferredIntent,
+    articleFormat: intentProfile.articleFormat,
+    searchAngle: `Create an intent-matched brief for ${keyword}${country ? ` in ${country}` : ""}.`,
+    localeFocus: country ? `Use ${country}-specific framing and references.` : "Follow the dominant locale in the SERP.",
+    suggestedTitleAngles: [
+      `${keyword}: Complete Brief`,
+      `Best Angle for ${keyword}`,
+      `${keyword}: SEO Content Brief`,
+    ],
+    recommendedH2s: baseH2s,
+    requiredDataPoints: dedupeStrings([...keywordSignals.dataPoints, ...serpInsights.recurringAttributes], 20),
+    sectionsToAvoid: ["generic introduction-only sections"],
+    secondaryKeywords: serpInsights.recurringThemes.slice(0, 8),
+    longTailKeywords: serpInsights.recurringFaqs.slice(0, 8),
+    semanticTerms: dedupeStrings([...serpInsights.recurringThemes, ...serpInsights.recurringAttributes], 20),
+    entities: serpInsights.recurringEntities.slice(0, 20),
+    faqQuestions: serpInsights.recurringFaqs.slice(0, 8),
+    opportunities: serpInsights.opportunities.slice(0, 10),
+    pageGoal: "Give the writer a detailed, practical, SERP-aligned brief.",
+    persona: intentProfile.audience,
+    wordCountRange: "1,500 - 2,500 words",
+    pageFormat: intentProfile.articleFormat,
+    metaDescriptionAngles: [
+      `Get a detailed content brief for ${keyword}.`,
+      `SERP-aligned brief for ${keyword} with section-level writer guidance.`,
+    ],
+  };
+}
+
+function buildFallbackOutlinePlan(
+  keyword: string,
+  keywordSignals: KeywordSignals,
+  blueprint: BriefBlueprint,
+  entityEnrichment: EntityEnrichment
+): OutlinePlan {
+  const sections: DraftBriefSection[] = blueprint.recommendedH2s.map((section) => ({
+    level: "H2",
+    heading: section.heading,
+    purpose: section.purpose,
+    section_type: "core",
+    must_cover: section.keyPoints.length ? section.keyPoints : keywordSignals.dataPoints,
+    research_needed: blueprint.requiredDataPoints,
+    differentiation: blueprint.opportunities,
+    examples: section.examples,
+    watch_out_for: section.watchOutFor,
+    subsections: section.h3s.length
+      ? section.h3s.map((heading) => ({
+          heading,
+          purpose: `Cover ${heading} with specific, useful detail.`,
+          must_cover: keywordSignals.itemDetailRequirements,
+        }))
+      : entityEnrichment.profiles.slice(0, keywordSignals.listCount || 6).map((profile) => ({
+          heading: profile.name,
+          purpose: `Cover ${profile.name} in depth.`,
+          must_cover: profile.mustCover,
+        })),
+  }));
+
+  return {
+    h1: keyword,
+    titleAngles: blueprint.suggestedTitleAngles.slice(0, 3),
+    sections,
+    comparisonPoints: keywordSignals.dataPoints.slice(0, 6),
+    faqQuestions: blueprint.faqQuestions.slice(0, 8),
+    itemTemplate: keywordSignals.itemDetailRequirements,
+    opportunities: blueprint.opportunities,
+  };
+}
+
+function buildFallbackStructuredBrief(
+  keyword: string,
+  country: string | undefined,
+  blueprint: BriefBlueprint,
+  outlinePlan: OutlinePlan,
+  serpInsights: AggregatedSerpInsights,
+  searchResults: SearchResult[],
+  keywordSignals: KeywordSignals
+): StructuredBrief {
+  return {
+    search_intent: blueprint.inferredIntent,
+    search_angle: blueprint.searchAngle,
+    article_type: blueprint.articleFormat,
+    brief_summary: `Fallback brief generated for ${keyword} using available SERP intelligence and heuristic planning.`,
+    title_options: outlinePlan.titleAngles.length ? outlinePlan.titleAngles : blueprint.suggestedTitleAngles.slice(0, 3),
+    h1: outlinePlan.h1 || keyword,
+    sections: outlinePlan.sections,
+    item_template: outlinePlan.itemTemplate.length ? outlinePlan.itemTemplate : keywordSignals.itemDetailRequirements,
+    comparison_points: outlinePlan.comparisonPoints,
+    faq_questions: outlinePlan.faqQuestions,
+    word_count_range: blueprint.wordCountRange,
+    page_goal: blueprint.pageGoal,
+    target_persona: blueprint.persona,
+    page_format: blueprint.pageFormat,
+    meta_descriptions: blueprint.metaDescriptionAngles.slice(0, 2),
+    url_slug: `/${keyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
+    secondary_keywords: blueprint.secondaryKeywords,
+    long_tail_keywords: blueprint.longTailKeywords,
+    entities: blueprint.entities.length ? blueprint.entities : serpInsights.recurringEntities,
+    semantic_terms: blueprint.semanticTerms,
+    internal_links: [],
+    external_linking_strategy: ["Link to authoritative supporting sources where appropriate."],
+    media_ideas: ["Use screenshots, tables, or comparison visuals if relevant."],
+    content_gaps: blueprint.opportunities,
+    competitor_references: searchResults.slice(0, 5).map((result) => ({
+      title: result.title,
+      url: result.link,
+      why_it_matters: result.snippet || "Competing SERP result.",
+    })),
+  };
+}
+
 function buildEntityEnrichment(
   keywordSignals: KeywordSignals,
   intentProfile: IntentProfile,
@@ -1897,13 +2066,26 @@ export async function processSingleKeyword(
     current: index + 1,
     total: total,
   });
-  const intentProfile = await openaiClassifyIntent(keyword, country, keywordSignals, searchResults);
+  let intentProfile: IntentProfile;
+  try {
+    intentProfile = await openaiClassifyIntent(keyword, country, keywordSignals, searchResults);
+  } catch (error) {
+    log(`Intent classification fallback for "${keyword}": ${error}`, "workflow");
+    await delay(LOAD_BACKOFF_MS);
+    intentProfile = buildFallbackIntentProfile(keywordSignals);
+  }
 
   sendEvent({ type: "filtering", keyword, message: `Filtering search results for "${keyword}"...`, current: index + 1, total: total });
   const { filtered_results } = filterSearchResults(searchResults, keyword);
 
   sendEvent({ type: "filtering", keyword, message: `Selecting the best competitor URLs for "${keyword}"...`, current: index + 1, total: total });
-  const topUrls = await openaiFilterTopUrls(filtered_results, keyword);
+  let topUrls: SearchResult[];
+  try {
+    topUrls = await openaiFilterTopUrls(filtered_results, keyword);
+  } catch (error) {
+    log(`URL selection fallback for "${keyword}": ${error}`, "workflow");
+    topUrls = filtered_results.slice(0, 5);
+  }
 
   const limit = pLimit(2);
   const insightPromises = topUrls.map((url, j) =>
@@ -1926,7 +2108,28 @@ export async function processSingleKeyword(
         total: total,
       });
 
-      return openaiExtractCompetitorInsight(content, url.link, keyword, country, intentProfile);
+      try {
+        return await openaiExtractCompetitorInsight(content, url.link, keyword, country, intentProfile);
+      } catch (error) {
+        log(`Competitor insight fallback for "${keyword}" on ${url.link}: ${error}`, "workflow");
+        return {
+          source_url: url.link,
+          page_title: url.title || url.link,
+          content_format: "article",
+          estimated_word_count: 0,
+          headings: [],
+          common_themes: [],
+          unique_angles: [],
+          notable_features: [],
+          named_entities: [],
+          factual_attributes: [],
+          locale_signals: country ? [country] : [],
+          item_candidates: [],
+          faq_candidates: [],
+          pricing_mentions: [],
+          comparison_dimensions: [],
+        } satisfies CompetitorInsight;
+      }
     })
   );
 
@@ -1943,14 +2146,21 @@ export async function processSingleKeyword(
     total: total,
   });
 
-  const blueprint = await openaiBuildBriefBlueprint(
-    keyword,
-    country,
-    keywordSignals,
-    intentProfile,
-    topUrls,
-    serpInsights
-  );
+  let blueprint: BriefBlueprint;
+  try {
+    blueprint = await openaiBuildBriefBlueprint(
+      keyword,
+      country,
+      keywordSignals,
+      intentProfile,
+      topUrls,
+      serpInsights
+    );
+  } catch (error) {
+    log(`Blueprint fallback for "${keyword}": ${error}`, "workflow");
+    await delay(LOAD_BACKOFF_MS);
+    blueprint = buildFallbackBlueprint(keyword, country, keywordSignals, intentProfile, serpInsights);
+  }
 
   sendEvent({
     type: "generating",
@@ -1959,15 +2169,22 @@ export async function processSingleKeyword(
     current: index + 1,
     total: total,
   });
-  const outlinePlan = await openaiBuildOutlinePlan(
-    keyword,
-    country,
-    keywordSignals,
-    intentProfile,
-    blueprint,
-    serpInsights,
-    entityEnrichment
-  );
+  let outlinePlan: OutlinePlan;
+  try {
+    outlinePlan = await openaiBuildOutlinePlan(
+      keyword,
+      country,
+      keywordSignals,
+      intentProfile,
+      blueprint,
+      serpInsights,
+      entityEnrichment
+    );
+  } catch (error) {
+    log(`Outline fallback for "${keyword}": ${error}`, "workflow");
+    await delay(LOAD_BACKOFF_MS);
+    outlinePlan = buildFallbackOutlinePlan(keyword, keywordSignals, blueprint, entityEnrichment);
+  }
 
   sendEvent({
     type: "generating",
@@ -1977,17 +2194,32 @@ export async function processSingleKeyword(
     total: total,
   });
 
-  let structuredBrief = await openaiGenerateStructuredBrief(
-    keyword,
-    country,
-    keywordSignals,
-    intentProfile,
-    blueprint,
-    outlinePlan,
-    topUrls,
-    serpInsights,
-    entityEnrichment
-  );
+  let structuredBrief: StructuredBrief;
+  try {
+    structuredBrief = await openaiGenerateStructuredBrief(
+      keyword,
+      country,
+      keywordSignals,
+      intentProfile,
+      blueprint,
+      outlinePlan,
+      topUrls,
+      serpInsights,
+      entityEnrichment
+    );
+  } catch (error) {
+    log(`Brief generation fallback for "${keyword}": ${error}`, "workflow");
+    await delay(LOAD_BACKOFF_MS);
+    structuredBrief = buildFallbackStructuredBrief(
+      keyword,
+      country,
+      blueprint,
+      outlinePlan,
+      serpInsights,
+      topUrls,
+      keywordSignals
+    );
+  }
   const qualityReport = evaluateBriefQuality(structuredBrief, keywordSignals, intentProfile, serpInsights);
   if (qualityReport.needsRepair) {
     sendEvent({
@@ -1997,18 +2229,23 @@ export async function processSingleKeyword(
       current: index + 1,
       total: total,
     });
-    structuredBrief = await openaiRepairStructuredBrief(
-      keyword,
-      country,
-      keywordSignals,
-      intentProfile,
-      blueprint,
-      outlinePlan,
-      serpInsights,
-      entityEnrichment,
-      structuredBrief,
-      qualityReport
-    );
+    try {
+      structuredBrief = await openaiRepairStructuredBrief(
+        keyword,
+        country,
+        keywordSignals,
+        intentProfile,
+        blueprint,
+        outlinePlan,
+        serpInsights,
+        entityEnrichment,
+        structuredBrief,
+        qualityReport
+      );
+    } catch (error) {
+      log(`Repair fallback for "${keyword}": ${error}`, "workflow");
+      await delay(LOAD_BACKOFF_MS);
+    }
   }
   const briefContent = renderStructuredBrief(keyword, country, structuredBrief);
   const timestamp = new Date().toISOString();
@@ -2076,6 +2313,16 @@ export async function processWorkflow(
         current: i + 1,
         total: items.length,
       });
+    }
+
+    if (i < items.length - 1 && KEYWORD_COOLDOWN_MS > 0) {
+      sendEvent({
+        type: "generating",
+        message: `Cooling down before the next keyword...`,
+        current: i + 1,
+        total: items.length,
+      });
+      await delay(KEYWORD_COOLDOWN_MS);
     }
   }
 

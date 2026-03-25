@@ -34,6 +34,8 @@ interface KeywordProcessResult {
   error?: string;
 }
 
+const KEYWORD_COOLDOWN_MS = 2500;
+
 function addKeyValueRow(worksheet: ExcelJS.Worksheet, label: string, value: string) {
   const row = worksheet.addRow([label, value]);
   row.getCell(1).font = { bold: true };
@@ -369,6 +371,10 @@ export default function Home() {
           const failureProgress = ((i + 1) / keywords.length) * 100;
           maxProgressRef.current = Math.max(maxProgressRef.current, failureProgress);
           setProgress(Math.min(maxProgressRef.current, 99));
+        }
+        if (i < keywords.length - 1) {
+          setProgressMessage(`Cooling down before processing the next keyword...`);
+          await new Promise((resolve) => setTimeout(resolve, KEYWORD_COOLDOWN_MS));
         }
       }
 
