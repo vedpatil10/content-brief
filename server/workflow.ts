@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { BriefResult, ProgressEvent } from "../shared/schema.js";
+import type { BriefResult, ProgressEvent, StructuredBrief } from "../shared/schema.js";
 import pLimit from "p-limit";
 import { google } from "googleapis";
 import { JWT } from "google-auth-library";
@@ -251,11 +251,14 @@ interface KeywordSignals {
   inferredIntent: string;
   articleFormat: string;
   listCount?: number;
+  primarySubject: string;
   modifierTerms: string[];
   localeHints: string[];
   requiresLocalSpecifics: boolean;
   dataPoints: string[];
   sectionPatterns: string[];
+  mandatorySections: string[];
+  itemDetailRequirements: string[];
 }
 
 interface BriefBlueprint {
@@ -287,6 +290,135 @@ interface BriefBlueprint {
   metaDescriptionAngles: string[];
 }
 
+function safeStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
+}
+
+function renderBullets(items: string[], emptyText = "None specified"): string {
+  if (!items.length) return `- ${emptyText}`;
+  return items.map((item) => `- ${item}`).join("\n");
+}
+
+function renderStructuredBrief(
+  keyword: string,
+  country: string | undefined,
+  brief: StructuredBrief
+): string {
+  const sectionBlocks = brief.sections.map((section) => {
+    const subsections = section.subsections.map((subsection) => {
+      return [
+        `  H3: ${subsection.heading}`,
+        `  Purpose: ${subsection.purpose}`,
+        `  Coverage Checklist:`,
+        ...safeStringArray(subsection.must_cover).map((item) => `  - ${item}`),
+      ].join("\n");
+    }).join("\n\n");
+
+    return [
+      `${section.level}: ${section.heading}`,
+      `Purpose: ${section.purpose}`,
+      `Section Type: ${section.section_type}`,
+      `Writer Must Cover:`,
+      renderBullets(section.must_cover),
+      `Research Needed:`,
+      renderBullets(section.research_needed),
+      `Differentiation Notes:`,
+      renderBullets(section.differentiation),
+      `Competitor Examples:`,
+      renderBullets(section.examples),
+      `Watch Out For:`,
+      renderBullets(section.watch_out_for),
+      subsections,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n===================================\n\n");
+
+  const competitorRefs = brief.competitor_references.map((reference, index) => {
+    return `${index + 1}. ${reference.title} | ${reference.url} | Why it matters: ${reference.why_it_matters}`;
+  }).join("\n");
+
+  return `CONTENT BRIEF: ${keyword}
+COUNTRY / REGION: ${country || "Not specified"}
+
+===================================
+BRIEF SNAPSHOT
+===================================
+Search Intent: ${brief.search_intent}
+Recommended Angle: ${brief.search_angle}
+Article Type: ${brief.article_type}
+Page Goal: ${brief.page_goal}
+Target Persona: ${brief.target_persona}
+Word Count Range: ${brief.word_count_range}
+Page Format: ${brief.page_format}
+
+Summary:
+${brief.brief_summary}
+
+===================================
+PAGE TITLE OPTIONS
+===================================
+${brief.title_options.map((title, index) => `${index + 1}. ${title}`).join("\n")}
+
+===================================
+OUTLINE & WRITER INSTRUCTIONS
+===================================
+H1: ${brief.h1}
+
+${sectionBlocks}
+
+===================================
+ITEM DETAIL TEMPLATE
+===================================
+${renderBullets(brief.item_template, "Use the section-specific writer notes above.")}
+
+===================================
+COMPARISON / EVALUATION POINTS
+===================================
+${renderBullets(brief.comparison_points)}
+
+===================================
+FAQS
+===================================
+${brief.faq_questions.map((question, index) => `${index + 1}. ${question}`).join("\n")}
+
+===================================
+TECHNICAL SEO ELEMENTS
+===================================
+Meta Description Options:
+${brief.meta_descriptions.map((description, index) => `${index + 1}. ${description}`).join("\n")}
+
+URL Structure: ${brief.url_slug}
+
+Keyword Clusters:
+- Primary: ${keyword}
+- Secondary: ${brief.secondary_keywords.join(", ") || "None specified"}
+- Long-tail: ${brief.long_tail_keywords.join(", ") || "None specified"}
+
+Entity Recommendations:
+${renderBullets(brief.entities)}
+
+Semantic Search Terms:
+${renderBullets(brief.semantic_terms)}
+
+Internal Links:
+${renderBullets(brief.internal_links)}
+
+External Linking Strategy:
+${renderBullets(brief.external_linking_strategy)}
+
+Media Ideas:
+${renderBullets(brief.media_ideas)}
+
+===================================
+COMPETITOR REFERENCES
+===================================
+${competitorRefs || "No competitor references captured."}
+
+===================================
+CONTENT GAPS & OPPORTUNITIES
+===================================
+${renderBullets(brief.content_gaps)}`;
+}
+
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -313,12 +445,22 @@ function deriveKeywordSignals(keyword: string, country?: string): KeywordSignals
   const isHowTo = /\b(how to|guide|tips|ways|what is)\b/i.test(lowerKeyword);
   const isCommercial = /\b(price|pricing|cost|buy|service|agency|company|software|tool|tools|platform)\b/i.test(lowerKeyword);
   const isHospitality = /\b(hotel|hotels|restaurant|restaurants|cafe|cafes|coffee shop|coffee shops|resort|resorts|bar|bars)\b/i.test(lowerKeyword);
+  const isToolKeyword = /\b(tool|tools|software|app|apps|platform|platforms|ai tool|ai tools)\b/i.test(lowerKeyword);
+  const primarySubject = isToolKeyword
+    ? "tools"
+    : isHospitality
+      ? "venues"
+      : isComparison
+        ? "compared options"
+        : "topic";
 
   let keywordType = "informational";
   let articleFormat = "guide";
   let inferredIntent = "informational";
   let dataPoints = ["search intent alignment", "key subtopics", "common competitor sections"];
   let sectionPatterns = ["overview", "main topic coverage", "supporting FAQs"];
+  let mandatorySections = ["direct intent match", "SERP-aligned coverage"];
+  let itemDetailRequirements = ["specific examples", "real-world relevance"];
 
   if (isComparison) {
     keywordType = "comparison";
@@ -326,30 +468,68 @@ function deriveKeywordSignals(keyword: string, country?: string): KeywordSignals
     inferredIntent = "commercial investigation";
     dataPoints = ["comparison criteria", "feature differences", "pricing", "best-fit use cases", "pros and cons"];
     sectionPatterns = ["comparison table", "head-to-head criteria", "best for X"];
+    mandatorySections = ["comparison framework", "head-to-head breakdown", "best choice by use case"];
+    itemDetailRequirements = ["feature differences", "pros and cons", "pricing", "fit by audience"];
   } else if (isListicle && isLocal && isHospitality) {
     keywordType = "localized ranked list";
     articleFormat = "ranked local listicle";
     inferredIntent = "local commercial investigation";
     dataPoints = ["ranked entities", "neighborhood/location", "price range", "signature offering", "amenities", "booking details", "why it stands out"];
     sectionPatterns = ["ranked list", "selection methodology", "map/area guidance", "booking tips"];
+    mandatorySections = ["selection criteria", "ranked venues", "location guidance", "practical visit details"];
+    itemDetailRequirements = ["location", "price range", "standout features", "who it suits", "drawbacks", "booking or visit info"];
   } else if (isListicle) {
     keywordType = "ranked list";
     articleFormat = "listicle";
     inferredIntent = isCommercial ? "commercial investigation" : "informational";
     dataPoints = ["ranked items", "selection criteria", "use cases", "pricing or accessibility", "pros and cons"];
     sectionPatterns = ["ranked picks", "how we chose", "best for segments"];
+    mandatorySections = ["selection criteria", "ranked list", "best by use case"];
+    itemDetailRequirements = ["what it is", "best use cases", "advantages", "disadvantages", "pricing", "alternatives"];
   } else if (isHowTo) {
     keywordType = "how-to";
     articleFormat = "step-by-step guide";
     inferredIntent = "informational";
     dataPoints = ["process steps", "requirements", "mistakes to avoid", "examples"];
     sectionPatterns = ["steps", "requirements", "examples", "FAQ"];
+    mandatorySections = ["step-by-step process", "requirements", "mistakes to avoid", "examples"];
+    itemDetailRequirements = ["step detail", "practical examples", "pitfalls", "expected outcomes"];
   } else if (isCommercial) {
     keywordType = "commercial page";
     articleFormat = "buyer guide";
     inferredIntent = "commercial investigation";
     dataPoints = ["features", "pricing", "fit by audience", "alternatives", "selection criteria"];
     sectionPatterns = ["features", "pricing", "buyer advice", "alternatives"];
+    mandatorySections = ["features", "pricing", "best for audience segments", "alternatives"];
+    itemDetailRequirements = ["feature coverage", "pricing", "fit", "limitations"];
+  }
+
+  if (isToolKeyword) {
+    dataPoints = Array.from(new Set([
+      ...dataPoints,
+      "free plan details",
+      "paid plan details",
+      "student use cases",
+      "setup or onboarding complexity",
+      "alternatives",
+    ]));
+    sectionPatterns = ["evaluation criteria", "tool-by-tool breakdown", "free vs paid", "best alternatives", "use-case recommendations"];
+    mandatorySections = [
+      "evaluation criteria",
+      "ranked tools",
+      "tool-by-tool breakdown",
+      "free vs paid comparison",
+      "best alternatives by student use case",
+    ];
+    itemDetailRequirements = [
+      "what the tool does",
+      "how students can use it",
+      "advantages",
+      "disadvantages",
+      "free plan",
+      "paid plans",
+      "best alternative options",
+    ];
   }
 
   return {
@@ -357,11 +537,14 @@ function deriveKeywordSignals(keyword: string, country?: string): KeywordSignals
     inferredIntent,
     articleFormat,
     listCount,
+    primarySubject,
     modifierTerms,
     localeHints,
     requiresLocalSpecifics: isLocal || isHospitality,
     dataPoints,
     sectionPatterns,
+    mandatorySections,
+    itemDetailRequirements,
   };
 }
 
@@ -610,6 +793,8 @@ Rules:
 - If the keyword is a local list query, the outline must center on ranked entities, selection criteria, neighborhoods/areas, pricing, standout features, and booking/visit guidance.
 - Only include food/menu/signature dish requirements when the keyword is clearly restaurant/cafe/food related.
 - If the keyword is a software/product query, emphasize comparison criteria, pricing, features, use cases, and alternatives.
+- If the keyword is a best/top tools query, you must make the outline tool-first, not advice-first. The main body should revolve around the tools themselves.
+- For tool keywords, the recommended outline must explicitly include evaluation criteria, a tool-by-tool breakdown, free vs paid guidance, and best alternatives by use case.
 - If the keyword is informational, emphasize definitions, process, examples, and practical applications.
 - Use country/region context for spelling, examples, and local SERP expectations.
 - Avoid filler sections that do not support the query intent.
@@ -681,14 +866,14 @@ Return JSON with this exact top-level shape:
   });
 }
 
-async function openaiGenerateBrief(
+async function openaiGenerateStructuredBrief(
   keyword: string,
   country: string | undefined,
   keywordSignals: KeywordSignals,
   blueprint: BriefBlueprint,
   searchResults: SearchResult[],
   competitorAnalysis: string
-): Promise<string> {
+): Promise<StructuredBrief> {
   const prompt = `You are Britta, an expert content strategist AI that creates detailed content briefs.
 
 KEYWORD: ${keyword}
@@ -705,122 +890,218 @@ ${formatSearchResults(searchResults)}
 COMPETITOR ANALYSIS:
 ${competitorAnalysis}
 
-TASK: Create a comprehensive content brief following this exact structure:
+TASK:
+Return a JSON object for a deep, keyword-specific content brief. Do not return prose outside JSON.
 
-CONTENT BRIEF: ${keyword}
+Rules:
+- The brief must NOT reuse a generic section pattern across keywords.
+- If the keyword is a "best/top/list" query, the brief must make the list itself the center of the outline.
+- For software/tool keywords, include tool-by-tool depth requirements such as what it is, best use cases, how the target audience uses it, advantages, disadvantages, pricing, free plan, paid plan, and viable alternatives.
+- For software/tool keywords, the sections array must explicitly include:
+  1. evaluation criteria
+  2. the ranked tools list
+  3. a tool-by-tool breakdown section with H3s or equivalent coverage for individual tools
+  4. free vs paid guidance
+  5. alternatives or best-for-use-case recommendations
+- For student tool keywords, every major tool subsection should require: what it is, how students can use it, strongest features, weaknesses, pricing, free plan, and alternatives.
+- For local business/place keywords, include entity-level fields such as location, neighborhood, price range, standout features, who it suits, drawbacks, and booking/visit details.
+- For comparison keywords, include clear comparison criteria and head-to-head decision factors.
+- For informational/how-to keywords, include process depth, examples, mistakes, and implementation details.
+- Do not add filler sections like "How to choose" unless they are strongly supported by the SERP.
+- The sections array must contain substantive, unique sections with detailed writer guidance.
+- Each section must have strong `must_cover` and `research_needed` arrays.
+- Use competitor URLs as examples where useful.
 
-===================================
-PAGE TITLE OPTIONS
-===================================
-Use the blueprint and SERP analysis to provide 3 title options:
-1. [Title 1]
-2. [Title 2]
-3. [Title 3]
-
-===================================
-HEADING STRUCTURE
-===================================
-H1: [Main heading]
-
-H2: [Section 1]
-Writer Notes:
-- Key points: [list main points to cover based on intent, locale, and competitor analysis]
-- Research needed: [specific factual data the writer must collect]
-- Style guide: [tone and approach recommendations]
-- Examples: [reference specific examples, entities, and links from the competing pages]
-- Watch out for: [common pitfalls observed]
-
-  H3: [Subsection 1.1]
-  H3: [Subsection 1.2]
-
-[Continue with the H2/H3 structure that best fits the keyword. Do not force generic sections.]
-
-===================================
-FAQS
-===================================
-1. [Question 1]
-2. [Question 2]
-3. [Question 3]
-4. [Question 4]
-5. [Question 5]
-6. [Question 6]
-
-===================================
-CONTENT SPECIFICATIONS
-===================================
-Word Count Range: [X - Y words based on competitor analysis]
-Page Goal: [Primary objective]
-Target Persona: [Audience description]
-Page Format: [Recommended format]
-
-===================================
-TECHNICAL SEO ELEMENTS
-===================================
-Meta Description Options:
-1. [Meta description 1]
-2. [Meta description 2]
-
-URL Structure: [recommended URL format]
-
-Keyword Clusters:
-- Primary: ${keyword}
-- Secondary: [related keywords from analysis]
-- Long-tail: [long-tail variations]
-
-Entity Recommendations:
-- [entity 1]
-- [entity 2]
-- [entity 3]
-
-Semantic Search Terms:
-- [term 1]
-- [term 2]
-- [term 3]
-
-===================================
-CONTENT ENHANCEMENT IDEAS
-===================================
-Lists/Tables:
-- [suggestion 1]
-- [suggestion 2]
-
-EEAT Incorporation:
-- [EEAT element 1]
-- [EEAT element 2]
-
-CTA Recommendations:
-- [CTA placement and messaging]
-
-External Linking Strategy:
-- [linking recommendations]
-
-Media Placement:
-- [media suggestions]
-
-===================================
-OPPORTUNITIES & GAPS
-===================================
-[List content gaps found in competitor analysis]
-
-===================================
-END OF BRIEF
-===================================
-
-Critical rules:
-- The heading structure must be customized to the keyword. Do not reuse generic sections like "How to choose" or "Common use cases" unless the SERP clearly supports them.
-- If the keyword implies a list of real places, products, or services, the brief must tell the writer to include actual named entities and the factual attributes needed for each entry.
-- If the keyword is localized, explicitly reflect the target geography and local search expectations.
-- Only ask for menu items or signature dishes when the topic is food/hospitality related.
-- Keep the brief actionable for SurferSEO-style content scoring by using specific entities, semantically related terms, and intent-aligned subsections.
-
-Generate the complete brief based STRICTLY on the blueprint, SERP results, and competitor analysis provided. Be specific and actionable.`;
+Return JSON with this exact shape:
+{
+  "search_intent": "...",
+  "search_angle": "...",
+  "article_type": "...",
+  "brief_summary": "...",
+  "title_options": ["...", "...", "..."],
+  "h1": "...",
+  "sections": [
+    {
+      "level": "H2",
+      "heading": "...",
+      "purpose": "...",
+      "section_type": "...",
+      "must_cover": ["...", "..."],
+      "research_needed": ["...", "..."],
+      "differentiation": ["...", "..."],
+      "examples": ["...", "..."],
+      "watch_out_for": ["...", "..."],
+      "subsections": [
+        {
+          "heading": "...",
+          "purpose": "...",
+          "must_cover": ["...", "..."]
+        }
+      ]
+    }
+  ],
+  "item_template": ["...", "..."],
+  "comparison_points": ["...", "..."],
+  "faq_questions": ["...", "..."],
+  "word_count_range": "...",
+  "page_goal": "...",
+  "target_persona": "...",
+  "page_format": "...",
+  "meta_descriptions": ["...", "..."],
+  "url_slug": "...",
+  "secondary_keywords": ["...", "..."],
+  "long_tail_keywords": ["...", "..."],
+  "entities": ["...", "..."],
+  "semantic_terms": ["...", "..."],
+  "internal_links": ["...", "..."],
+  "external_linking_strategy": ["...", "..."],
+  "media_ideas": ["...", "..."],
+  "content_gaps": ["...", "..."],
+  "competitor_references": [
+    {
+      "title": "...",
+      "url": "...",
+      "why_it_matters": "..."
+    }
+  ]
+}`;
 
   return withRetry(async () => {
     const response = await openai.chat.completions.create({
       model: getModelName(),
       messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
     });
-    return response.choices[0].message.content || "";
+
+    const content = response.choices[0].message.content || "{}";
+    const parsed = JSON.parse(content) as Partial<StructuredBrief>;
+    const defaultToolSections = keywordSignals.primarySubject === "tools" ? [
+      {
+        level: "H2" as const,
+        heading: `How We Evaluated ${keyword}`,
+        purpose: "Explain the criteria used to rank the tools so the article feels credible and useful.",
+        section_type: "evaluation criteria",
+        must_cover: ["selection criteria", "student needs", "pricing sensitivity", "free-plan usefulness"],
+        research_needed: ["common student use cases", "pricing and free-tier availability", "current 2026 positioning where applicable"],
+        differentiation: ["use practical student scenarios instead of vague feature lists"],
+        examples: [],
+        watch_out_for: ["generic criteria with no relevance to students"],
+        subsections: [],
+      },
+      {
+        level: "H2" as const,
+        heading: `Best ${keyword}`,
+        purpose: "Make the ranked tools list the core of the article.",
+        section_type: "ranked tools list",
+        must_cover: keywordSignals.itemDetailRequirements,
+        research_needed: blueprint.requiredDataPoints,
+        differentiation: ["include clear student use cases and pricing context for each tool"],
+        examples: [],
+        watch_out_for: ["listing tools without explaining how students use them"],
+        subsections: (blueprint.recommendedH2s[0]?.h3s || []).slice(0, keywordSignals.listCount || 8).map((heading) => ({
+          heading,
+          purpose: "Break down one tool in depth.",
+          must_cover: keywordSignals.itemDetailRequirements,
+        })),
+      },
+      {
+        level: "H2" as const,
+        heading: "Free vs Paid Plans",
+        purpose: "Help students understand whether the free plan is enough or if an upgrade is worth paying for.",
+        section_type: "pricing guidance",
+        must_cover: ["free plan limitations", "paid upgrade value", "best budget picks", "where premium plans make sense"],
+        research_needed: ["current free-tier details", "entry pricing", "student affordability considerations"],
+        differentiation: ["focus on affordability and practical student workflows"],
+        examples: [],
+        watch_out_for: ["pricing claims without current verification"],
+        subsections: [],
+      },
+      {
+        level: "H2" as const,
+        heading: "Best Alternatives by Student Use Case",
+        purpose: "Recommend the right tool based on what the student actually needs to do.",
+        section_type: "use-case mapping",
+        must_cover: ["best for writing", "best for research", "best for presentations", "best for studying", "best free option"],
+        research_needed: ["tool strengths by use case", "tradeoffs between options"],
+        differentiation: ["map tools to real academic workflows"],
+        examples: [],
+        watch_out_for: ["same recommendation for every use case"],
+        subsections: [],
+      },
+    ] : [];
+    const fallbackSections = blueprint.recommendedH2s.map((section) => ({
+      level: "H2" as const,
+      heading: section.heading,
+      purpose: section.purpose,
+      section_type: "core",
+      must_cover: section.keyPoints,
+      research_needed: blueprint.requiredDataPoints,
+      differentiation: blueprint.opportunities,
+      examples: section.examples,
+      watch_out_for: section.watchOutFor,
+      subsections: section.h3s.map((heading) => ({
+        heading,
+        purpose: `Support the section "${section.heading}" with a specific angle.`,
+        must_cover: section.keyPoints,
+      })),
+    }));
+
+    return {
+      search_intent: parsed.search_intent || blueprint.inferredIntent,
+      search_angle: parsed.search_angle || blueprint.searchAngle,
+      article_type: parsed.article_type || blueprint.articleFormat,
+      brief_summary: parsed.brief_summary || `Create a more detailed, intent-matched article for ${keyword}.`,
+      title_options: safeStringArray(parsed.title_options).slice(0, 3).length
+        ? safeStringArray(parsed.title_options).slice(0, 3)
+        : blueprint.suggestedTitleAngles.slice(0, 3),
+      h1: parsed.h1 || keyword,
+      sections: Array.isArray(parsed.sections) ? parsed.sections.map((section: any) => ({
+        level: section?.level === "H3" ? "H3" : "H2",
+        heading: String(section?.heading || "").trim(),
+        purpose: String(section?.purpose || "").trim(),
+        section_type: String(section?.section_type || "core").trim(),
+        must_cover: safeStringArray(section?.must_cover),
+        research_needed: safeStringArray(section?.research_needed),
+        differentiation: safeStringArray(section?.differentiation),
+        examples: safeStringArray(section?.examples),
+        watch_out_for: safeStringArray(section?.watch_out_for),
+        subsections: Array.isArray(section?.subsections) ? section.subsections.map((subsection: any) => ({
+          heading: String(subsection?.heading || "").trim(),
+          purpose: String(subsection?.purpose || "").trim(),
+          must_cover: safeStringArray(subsection?.must_cover),
+        })).filter((subsection: any) => subsection.heading) : [],
+      })).filter((section: any) => section.heading) : (defaultToolSections.length ? defaultToolSections : fallbackSections),
+      item_template: safeStringArray(parsed.item_template).length
+        ? safeStringArray(parsed.item_template)
+        : keywordSignals.itemDetailRequirements,
+      comparison_points: safeStringArray(parsed.comparison_points),
+      faq_questions: safeStringArray(parsed.faq_questions).slice(0, 8),
+      word_count_range: String(parsed.word_count_range || blueprint.wordCountRange),
+      page_goal: String(parsed.page_goal || blueprint.pageGoal),
+      target_persona: String(parsed.target_persona || blueprint.persona),
+      page_format: String(parsed.page_format || blueprint.pageFormat),
+      meta_descriptions: safeStringArray(parsed.meta_descriptions).slice(0, 2),
+      url_slug: String(parsed.url_slug || `/${keyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`),
+      secondary_keywords: safeStringArray(parsed.secondary_keywords),
+      long_tail_keywords: safeStringArray(parsed.long_tail_keywords),
+      entities: safeStringArray(parsed.entities),
+      semantic_terms: safeStringArray(parsed.semantic_terms),
+      internal_links: safeStringArray(parsed.internal_links),
+      external_linking_strategy: safeStringArray(parsed.external_linking_strategy),
+      media_ideas: safeStringArray(parsed.media_ideas),
+      content_gaps: safeStringArray(parsed.content_gaps),
+      competitor_references: Array.isArray(parsed.competitor_references)
+        ? parsed.competitor_references.map((reference: any) => ({
+            title: String(reference?.title || "").trim(),
+            url: String(reference?.url || "").trim(),
+            why_it_matters: String(reference?.why_it_matters || "").trim(),
+          })).filter((reference: any) => reference.title || reference.url)
+        : searchResults.slice(0, 5).map((result) => ({
+            title: result.title,
+            url: result.link,
+            why_it_matters: result.snippet || "Competing result from the target SERP.",
+          })),
+    };
   });
 }
 
@@ -906,7 +1187,7 @@ export async function processSingleKeyword(
     total: total,
   });
 
-  const briefContent = await openaiGenerateBrief(
+  const structuredBrief = await openaiGenerateStructuredBrief(
     keyword,
     country,
     keywordSignals,
@@ -914,12 +1195,11 @@ export async function processSingleKeyword(
     topUrls,
     combinedAnalysis
   );
+  const briefContent = renderStructuredBrief(keyword, country, structuredBrief);
   const timestamp = new Date().toISOString();
   const finalBrief = `${briefContent}\n\n---\nGenerated: ${timestamp}\n`;
 
   let googleDocUrl: string | undefined;
-  /* 
-  // Temporarily disabled per user request
   try {
     sendEvent({ type: "generating", keyword, message: "Creating Google Doc...", current: index + 1, total: total });
     googleDocUrl = await createGoogleDoc(keyword, finalBrief);
@@ -930,7 +1210,6 @@ export async function processSingleKeyword(
   } catch (error) {
     log(`Warning: Google Doc creation or write back failed: ${error}`, "workflow");
   }
-  */
 
   sendEvent({
     type: "keyword_complete",
@@ -948,6 +1227,7 @@ export async function processSingleKeyword(
     brief_content: finalBrief,
     timestamp,
     google_doc_url: googleDocUrl,
+    structured_brief: structuredBrief,
   };
 }
 
