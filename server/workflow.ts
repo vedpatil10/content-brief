@@ -569,35 +569,46 @@ function sanitizeGeneratedArticle(value: string): string {
     .trim();
 }
 
+function convertMarkdownHeadingsToOutlineLabels(value: string): string {
+  return value
+    .replace(/^####\s+(.+)$/gm, "H3: $1")
+    .replace(/^###\s+(.+)$/gm, "H3: $1")
+    .replace(/^##\s+(.+)$/gm, "H2: $1")
+    .replace(/^#\s+(.+)$/gm, "H1: $1");
+}
+
+function countWords(value: string): number {
+  return value.trim().split(/\s+/).filter(Boolean).length;
+}
+
 function buildFallbackArticleDraft(
   keyword: string,
   country: string | undefined,
   brief: StructuredBrief
 ): string {
-  const intro = `# ${brief.h1}
+  const intro = `H1: ${brief.h1}
 
-If you are searching for ${keyword}${country ? ` in ${country}` : ""}, this guide gives you a practical, up-to-date walkthrough based on the current search landscape.`;
+If you are searching for ${keyword}${country ? ` in ${country}` : ""}, this guide gives you a practical, detailed overview based on the current search landscape and the most relevant entities tied to this topic.`;
 
   const sections = brief.sections.map((section) => {
     const sectionBody = [
-      `## ${section.heading}`,
-      `${section.purpose}`,
+      `H2: ${section.heading}`,
+      `${section.purpose} This section should explain the topic clearly, add context, and give the reader enough detail to understand the main decisions, risks, options, or examples tied to the keyword.`,
       section.must_cover.length
-        ? `Key points: ${section.must_cover.join(", ")}.`
+        ? `Key points to cover in depth include ${section.must_cover.join(", ")}. Expand on each one with practical explanation instead of only naming it.`
         : "",
       ...section.subsections.map((subsection) => {
         const checklist = subsection.must_cover.length ? subsection.must_cover.join(", ") : "practical details and examples";
-        return `### ${subsection.heading}
-${subsection.purpose}
-In this part, focus on ${checklist}.`;
+        return `H3: ${subsection.heading}
+${subsection.purpose} In this part, explain ${checklist} in a way that a reader could directly use inside the final article without further rewriting.`;
       }),
     ].filter(Boolean).join("\n\n");
     return sectionBody;
   }).join("\n\n");
 
   const faqs = brief.faq_questions.length
-    ? `## FAQs
-\n${brief.faq_questions.map((question) => `### ${question}\nProvide a clear, direct answer tailored to the reader intent.`).join("\n\n")}`
+    ? `H2: FAQs
+\n${brief.faq_questions.map((question) => `H3: ${question}\nProvide a clear, direct, keyword-specific answer tailored to the reader intent.`).join("\n\n")}`
     : "";
 
   return [intro, sections, faqs].filter(Boolean).join("\n\n");
@@ -638,8 +649,12 @@ TOP REFERENCES:
 ${formatSearchResults(searchResults.slice(0, 5))}
 
 TASK:
-- Return ONLY the full article draft in markdown.
-- Use the provided H1/H2/H3 structure and actually write the content under each heading.
+- Return ONLY the full article draft.
+- Use this exact heading syntax in plain text:
+  H1: Main title
+  H2: Section heading
+  H3: Subsection heading
+- Actually write the content under each heading.
 - Do NOT write "writer notes", "must cover", or planning language.
 - Do NOT include HTML tags anywhere in the output.
 - Include concrete keyword-relevant details, examples, and useful specificity.
@@ -647,9 +662,11 @@ TASK:
 - The article must be clearly about the exact keyword, not generic advice.
 - If the keyword is a list query, include actual item names and write a real section for each one.
 - If the keyword is about tools, include actual tool names, what each tool does, use cases, strengths, weaknesses, pricing/free plan context, and alternatives where relevant.
+- For local healthcare/service keywords, keep the article centered on the exact condition/service and local treatment, diagnosis, symptoms, and provider options relevant to the location.
 - Use the priority entities/items when they fit the keyword. Do not use placeholders like "Tool 1" or "Restaurant 1".
 - Keep the tone clear and practical.
 - Target at least ${minimumWords} words unless the brief structure makes that impossible.
+- Make every H2 section substantive. Aim for at least 120 words under each main section, and at least 70 words under each important H3 where applicable.
 - Include an FAQ section if faq_questions are present.
 
 Output must be publishable draft text, not instructions.`;
@@ -661,6 +678,44 @@ Output must be publishable draft text, not instructions.`;
     });
     return (response.choices[0].message.content || "").trim();
   }, 3, 4000);
+}
+
+async function openaiExpandArticleDraft(
+  keyword: string,
+  country: string | undefined,
+  draft: string,
+  brief: StructuredBrief,
+  keywordSignals: KeywordSignals
+): Promise<string> {
+  const minimumWords = keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1400 : 1100;
+  const prompt = `Expand and improve this article draft.
+
+KEYWORD: ${keyword}
+COUNTRY / REGION: ${country || "Not specified"}
+MINIMUM WORD TARGET: ${minimumWords}
+
+STRUCTURED BRIEF:
+${compactJson(brief)}
+
+CURRENT DRAFT:
+${draft}
+
+TASK:
+- Return only the improved full article.
+- Keep the exact heading style: H1:, H2:, H3:
+- Make the article more detailed and more keyword-specific.
+- Add depth, examples, and useful explanation.
+- Remove generic filler.
+- Do not include HTML tags.
+- Ensure the result is comfortably above the minimum word target if possible.`;
+
+  return withRetry(async () => {
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: prompt }],
+    });
+    return (response.choices[0].message.content || "").trim();
+  }, 2, 4000);
 }
 
 function extractListCount(keyword: string): number | undefined {
@@ -2395,8 +2450,25 @@ export async function processSingleKeyword(
         topUrls
       );
       generatedContent = draft
-        ? sanitizeGeneratedArticle(draft)
+        ? sanitizeGeneratedArticle(convertMarkdownHeadingsToOutlineLabels(draft))
         : sanitizeGeneratedArticle(buildFallbackArticleDraft(keyword, country, structuredBrief));
+      const minimumWords = keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1400 : 1100;
+      if (countWords(generatedContent) < minimumWords) {
+        try {
+          const expandedDraft = await openaiExpandArticleDraft(
+            keyword,
+            country,
+            generatedContent,
+            structuredBrief,
+            keywordSignals
+          );
+          if (expandedDraft.trim()) {
+            generatedContent = sanitizeGeneratedArticle(convertMarkdownHeadingsToOutlineLabels(expandedDraft));
+          }
+        } catch (error) {
+          log(`Article expansion fallback for "${keyword}": ${error}`, "workflow");
+        }
+      }
     } catch (error) {
       log(`Article draft fallback for "${keyword}": ${error}`, "workflow");
       generatedContent = sanitizeGeneratedArticle(buildFallbackArticleDraft(keyword, country, structuredBrief));
