@@ -258,6 +258,7 @@ interface KeywordSignals {
   articleFormat: string;
   listCount?: number;
   primarySubject: string;
+  isMedical: boolean;
   modifierTerms: string[];
   localeHints: string[];
   requiresLocalSpecifics: boolean;
@@ -362,6 +363,7 @@ interface AggregatedSerpInsights {
   examplesByUrl: Array<{
     url: string;
     title: string;
+    estimated_word_count: number;
     winning_angles: string[];
     entities: string[];
     attributes: string[];
@@ -613,6 +615,29 @@ function countWords(value: string): number {
   return value.trim().split(/\s+/).filter(Boolean).length;
 }
 
+function normalizeHeadingLabel(value: string): string {
+  return value.replace(/^H[1-6]:\s*/i, "").trim();
+}
+
+function computeTargetWordMinimum(
+  keywordSignals: KeywordSignals,
+  serpInsights: AggregatedSerpInsights
+): number {
+  const competitorWordCounts = serpInsights.examplesByUrl
+    .map((example) => example.estimated_word_count)
+    .filter((count) => Number.isFinite(count) && count > 0);
+  const avgCompetitorWords = competitorWordCounts.length
+    ? Math.round(competitorWordCounts.reduce((total, count) => total + count, 0) / competitorWordCounts.length)
+    : 0;
+  const heuristicBase = keywordSignals.primarySubject === "tools" || keywordSignals.listCount
+    ? 1800
+    : keywordSignals.requiresLocalSpecifics
+      ? 1600
+      : 1400;
+  const competitorBase = avgCompetitorWords;
+  return Math.min(3200, Math.max(heuristicBase, competitorBase > 0 ? Math.round(competitorBase * 0.75) : 0));
+}
+
 function buildFallbackArticleDraft(
   keyword: string,
   country: string | undefined,
@@ -655,7 +680,7 @@ async function openaiGenerateArticleDraft(
   serpInsights: AggregatedSerpInsights,
   searchResults: SearchResult[]
 ): Promise<string> {
-  const minimumWords = keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1400 : 1100;
+  const minimumWords = computeTargetWordMinimum(keywordSignals, serpInsights);
   const entityList = dedupeStrings([
     ...entityEnrichment.profiles.map((profile) => profile.name),
     ...serpInsights.recurringEntities,
@@ -719,7 +744,10 @@ async function openaiExpandArticleDraft(
   brief: StructuredBrief,
   keywordSignals: KeywordSignals
 ): Promise<string> {
-  const minimumWords = keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1400 : 1100;
+  const minimumWords = Math.max(
+    keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1800 : 1500,
+    countWords(draft) + 300
+  );
   const prompt = `Expand and improve this article draft.
 
 KEYWORD: ${keyword}
@@ -773,6 +801,7 @@ function deriveKeywordSignals(keyword: string, country?: string): KeywordSignals
   const isCommercial = /\b(price|pricing|cost|buy|service|agency|company|software|tool|tools|platform)\b/i.test(lowerKeyword);
   const isHospitality = /\b(hotel|hotels|restaurant|restaurants|cafe|cafes|coffee shop|coffee shops|resort|resorts|bar|bars)\b/i.test(lowerKeyword);
   const isToolKeyword = /\b(tool|tools|software|app|apps|platform|platforms|ai tool|ai tools)\b/i.test(lowerKeyword);
+  const isMedical = /\b(syndrome|pain|prolapse|bladder|symptoms|diagnosis|treatment|therapy|condition|specialist|clinic|doctor|urology|urogynaecology|pelvic)\b/i.test(lowerKeyword);
   const primarySubject = isToolKeyword
     ? "tools"
     : isHospitality
@@ -859,12 +888,47 @@ function deriveKeywordSignals(keyword: string, country?: string): KeywordSignals
     ];
   }
 
+  if (isMedical) {
+    keywordType = isLocal ? "local healthcare guide" : "healthcare guide";
+    articleFormat = "medical guide";
+    inferredIntent = isLocal ? "local informational" : "informational";
+    dataPoints = dedupeStrings([
+      "what the condition is",
+      "symptoms",
+      "causes or risk factors",
+      "diagnosis",
+      "treatment options",
+      "when to seek medical help",
+      ...(isLocal ? ["local specialist options", "local treatment availability"] : []),
+    ], 20);
+    sectionPatterns = dedupeStrings([
+      "overview",
+      "symptoms",
+      "causes",
+      "diagnosis",
+      "treatment options",
+      ...(isLocal ? ["local specialists", "when to book an appointment"] : []),
+      "faqs",
+    ], 20);
+    mandatorySections = dedupeStrings([
+      "condition overview",
+      "symptoms and causes",
+      "diagnosis and treatment",
+      ...(isLocal ? ["local provider options"] : []),
+      "faqs",
+    ], 20);
+    itemDetailRequirements = isLocal
+      ? ["provider or clinic name", "what they treat", "why relevant locally", "consultation or referral context"]
+      : ["specific examples", "practical medical context"];
+  }
+
   return {
     keywordType,
     inferredIntent,
     articleFormat,
     listCount,
     primarySubject,
+    isMedical,
     modifierTerms,
     localeHints,
     requiresLocalSpecifics: isLocal || isHospitality,
@@ -1275,6 +1339,7 @@ function aggregateCompetitorInsights(insights: CompetitorInsight[]): AggregatedS
     examplesByUrl: insights.map((insight) => ({
       url: insight.source_url,
       title: insight.page_title || insight.source_url,
+      estimated_word_count: insight.estimated_word_count,
       winning_angles: insight.unique_angles.slice(0, 3),
       entities: insight.named_entities.slice(0, 5),
       attributes: insight.factual_attributes.slice(0, 5),
@@ -1307,7 +1372,34 @@ function buildFallbackBlueprint(
   intentProfile: IntentProfile,
   serpInsights: AggregatedSerpInsights
 ): BriefBlueprint {
-  const baseH2s = intentProfile.primarySubject === "tools"
+  const baseH2s = keywordSignals.isMedical
+    ? [
+        {
+          heading: `Understanding ${keyword}`,
+          purpose: "Explain the condition or topic clearly and align to local search intent.",
+          keyPoints: ["what it is", "who it affects", "common symptoms", "why local readers search for it"],
+          examples: [],
+          watchOutFor: ["generic health filler"],
+          h3s: ["Symptoms", "Common causes and risk factors"],
+        },
+        {
+          heading: `Diagnosis and Treatment Options for ${keyword}`,
+          purpose: "Give practical medical and treatment context.",
+          keyPoints: ["diagnosis process", "non-surgical treatment", "specialist treatment options", "when symptoms need medical review"],
+          examples: [],
+          watchOutFor: ["unverified medical claims"],
+          h3s: ["How it is diagnosed", "Treatment options", "When to seek medical help"],
+        },
+        ...(country || keywordSignals.requiresLocalSpecifics ? [{
+          heading: `Local Support and Specialist Options`,
+          purpose: "Help readers understand local care pathways and the type of providers relevant to the keyword.",
+          keyPoints: ["relevant local specialists", "referral or consultation context", "what to ask at an appointment"],
+          examples: [],
+          watchOutFor: ["invented provider details"],
+          h3s: ["Local specialists", "Questions to ask during consultation"],
+        }] : []),
+      ]
+    : intentProfile.primarySubject === "tools"
     ? [
         {
           heading: `How We Evaluated ${keyword}`,
@@ -1385,15 +1477,21 @@ function buildFallbackOutlinePlan(
     watch_out_for: section.watchOutFor,
     subsections: section.h3s.length
       ? section.h3s.map((heading) => ({
-          heading,
+          heading: normalizeHeadingLabel(heading),
           purpose: `Cover ${heading} with specific, useful detail.`,
-          must_cover: keywordSignals.itemDetailRequirements,
+          must_cover: keywordSignals.isMedical
+            ? ["clear explanation", "specific local relevance if applicable", "practical detail for the reader"]
+            : keywordSignals.itemDetailRequirements,
         }))
-      : entityEnrichment.profiles.slice(0, keywordSignals.listCount || 6).map((profile) => ({
-          heading: profile.name,
-          purpose: `Cover ${profile.name} in depth.`,
-          must_cover: profile.mustCover,
-        })),
+      : (
+          keywordSignals.primarySubject === "tools" || keywordSignals.primarySubject === "venues"
+            ? entityEnrichment.profiles.slice(0, keywordSignals.listCount || 6).map((profile) => ({
+                heading: normalizeHeadingLabel(profile.name),
+                purpose: `Cover ${profile.name} in depth.`,
+                must_cover: profile.mustCover,
+              }))
+            : []
+        ),
   }));
 
   return {
@@ -2484,7 +2582,7 @@ export async function processSingleKeyword(
       generatedContent = draft
         ? sanitizeGeneratedArticle(convertMarkdownHeadingsToOutlineLabels(draft))
         : sanitizeGeneratedArticle(buildFallbackArticleDraft(keyword, country, structuredBrief));
-      const minimumWords = keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1400 : 1100;
+      const minimumWords = computeTargetWordMinimum(keywordSignals, serpInsights);
       if (countWords(generatedContent) < minimumWords) {
         try {
           const expandedDraft = await openaiExpandArticleDraft(
