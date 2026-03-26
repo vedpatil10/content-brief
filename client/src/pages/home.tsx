@@ -36,8 +36,29 @@ interface KeywordProcessResult {
 
 const KEYWORD_COOLDOWN_MS = 2500;
 
+function sanitizeCellText(value: string) {
+  return String(value ?? "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/\uFFFD/g, " ")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
+function createUniqueSheetName(baseName: string, usedNames: Set<string>) {
+  const normalizedBase = sanitizeCellText(baseName).replace(/[\\/*?[\]:]/g, "").trim() || "Sheet";
+  let candidate = normalizedBase.substring(0, 31);
+  let suffix = 1;
+  while (usedNames.has(candidate)) {
+    const suffixText = `_${suffix}`;
+    candidate = `${normalizedBase.substring(0, Math.max(0, 31 - suffixText.length))}${suffixText}`;
+    suffix += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
 function addKeyValueRow(worksheet: ExcelJS.Worksheet, label: string, value: string) {
-  const row = worksheet.addRow([label, value]);
+  const row = worksheet.addRow([sanitizeCellText(label), sanitizeCellText(value)]);
   row.getCell(1).font = { bold: true };
   row.getCell(1).alignment = { vertical: "top" };
   row.getCell(2).alignment = { wrapText: true, vertical: "top" };
@@ -58,7 +79,7 @@ function populateBriefWorksheet(worksheet: ExcelJS.Worksheet, brief: BriefResult
 
   const structured = brief.structured_brief as StructuredBrief | undefined;
 
-  const titleRow = worksheet.addRow([`Content Brief: ${brief.keyword}`]);
+  const titleRow = worksheet.addRow([sanitizeCellText(`Content Brief: ${brief.keyword}`)]);
   titleRow.getCell(1).font = { bold: true, size: 16 };
   worksheet.mergeCells(`A${titleRow.number}:D${titleRow.number}`);
 
@@ -69,7 +90,7 @@ function populateBriefWorksheet(worksheet: ExcelJS.Worksheet, brief: BriefResult
 
   if (structured) {
     worksheet.addRow([]);
-    const quickHeader = worksheet.addRow(["Quick Notes"]);
+    const quickHeader = worksheet.addRow([sanitizeCellText("Quick Notes")]);
     quickHeader.getCell(1).font = { bold: true, size: 14 };
     worksheet.mergeCells(`A${quickHeader.number}:D${quickHeader.number}`);
     addKeyValueRow(worksheet, "H1", structured.h1);
@@ -80,11 +101,11 @@ function populateBriefWorksheet(worksheet: ExcelJS.Worksheet, brief: BriefResult
   }
 
   worksheet.addRow([]);
-  const briefHeader = worksheet.addRow(["Copy Ready Brief"]);
+  const briefHeader = worksheet.addRow([sanitizeCellText("Copy Ready Brief")]);
   briefHeader.getCell(1).font = { bold: true, size: 14 };
   worksheet.mergeCells(`A${briefHeader.number}:D${briefHeader.number}`);
   for (const line of brief.brief_content.split("\n")) {
-    const row = worksheet.addRow([line]);
+    const row = worksheet.addRow([sanitizeCellText(line)]);
     worksheet.mergeCells(`A${row.number}:D${row.number}`);
     row.getCell(1).alignment = { wrapText: true, vertical: "top" };
     if (line.startsWith("CONTENT BRIEF:") || line.startsWith("H1:") || line.startsWith("H2:") || line.startsWith("  H3:")) {
@@ -309,9 +330,10 @@ export default function Home() {
     
     try {
       const workbook = new ExcelJS.Workbook();
+      const usedSheetNames = new Set<string>();
 
       for (const brief of allBriefs) {
-        const sheetName = brief.keyword.substring(0, 31).replace(/[\\/*?[\]:]/g, "");
+        const sheetName = createUniqueSheetName(brief.keyword, usedSheetNames);
         const worksheet = workbook.addWorksheet(sheetName);
         populateBriefWorksheet(worksheet, brief);
       }

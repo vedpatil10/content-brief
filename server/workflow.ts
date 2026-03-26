@@ -548,6 +548,27 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function stripHtmlTags(value: string): string {
+  return value
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+}
+
+function sanitizeForExcel(value: string): string {
+  return value
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/\uFFFD/g, " ")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
+function sanitizeGeneratedArticle(value: string): string {
+  return sanitizeForExcel(stripHtmlTags(value))
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function buildFallbackArticleDraft(
   keyword: string,
   country: string | undefined,
@@ -586,16 +607,29 @@ async function openaiGenerateArticleDraft(
   keyword: string,
   country: string | undefined,
   brief: StructuredBrief,
+  keywordSignals: KeywordSignals,
+  entityEnrichment: EntityEnrichment,
   serpInsights: AggregatedSerpInsights,
   searchResults: SearchResult[]
 ): Promise<string> {
+  const minimumWords = keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1400 : 1100;
+  const entityList = dedupeStrings([
+    ...entityEnrichment.profiles.map((profile) => profile.name),
+    ...serpInsights.recurringEntities,
+    ...serpInsights.itemCandidates,
+  ], 20);
   const prompt = `You are an expert SEO writer. Write a full, paste-ready article draft.
 
 KEYWORD: ${keyword}
 COUNTRY / REGION: ${country || "Not specified"}
+KEYWORD SIGNALS:
+${compactJson(keywordSignals)}
 
 STRUCTURED BRIEF:
 ${compactJson(brief)}
+
+PRIORITY ENTITIES / ITEMS:
+${compactJson(entityList)}
 
 SERP INSIGHTS:
 ${compactJson(serpInsights)}
@@ -607,9 +641,15 @@ TASK:
 - Return ONLY the full article draft in markdown.
 - Use the provided H1/H2/H3 structure and actually write the content under each heading.
 - Do NOT write "writer notes", "must cover", or planning language.
+- Do NOT include HTML tags anywhere in the output.
 - Include concrete keyword-relevant details, examples, and useful specificity.
+- Make the content directly usable in an article without additional rewriting.
+- The article must be clearly about the exact keyword, not generic advice.
+- If the keyword is a list query, include actual item names and write a real section for each one.
+- If the keyword is about tools, include actual tool names, what each tool does, use cases, strengths, weaknesses, pricing/free plan context, and alternatives where relevant.
+- Use the priority entities/items when they fit the keyword. Do not use placeholders like "Tool 1" or "Restaurant 1".
 - Keep the tone clear and practical.
-- Target approximately ${brief.word_count_range}.
+- Target at least ${minimumWords} words unless the brief structure makes that impossible.
 - Include an FAQ section if faq_questions are present.
 
 Output must be publishable draft text, not instructions.`;
@@ -2349,13 +2389,17 @@ export async function processSingleKeyword(
         keyword,
         country,
         structuredBrief,
+        keywordSignals,
+        entityEnrichment,
         serpInsights,
         topUrls
       );
-      generatedContent = draft || buildFallbackArticleDraft(keyword, country, structuredBrief);
+      generatedContent = draft
+        ? sanitizeGeneratedArticle(draft)
+        : sanitizeGeneratedArticle(buildFallbackArticleDraft(keyword, country, structuredBrief));
     } catch (error) {
       log(`Article draft fallback for "${keyword}": ${error}`, "workflow");
-      generatedContent = buildFallbackArticleDraft(keyword, country, structuredBrief);
+      generatedContent = sanitizeGeneratedArticle(buildFallbackArticleDraft(keyword, country, structuredBrief));
     }
   }
   const timestamp = new Date().toISOString();
