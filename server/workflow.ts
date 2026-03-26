@@ -20,6 +20,7 @@ const LOAD_BACKOFF_MS = Number(process.env.LOAD_BACKOFF_MS || 8000);
 const MAX_COMPETITOR_URLS = Math.max(1, Number(process.env.MAX_COMPETITOR_URLS || 3));
 const FAST_MODE = (process.env.BRIEF_FAST_MODE || "true").toLowerCase() !== "false";
 const ENABLE_GOOGLE_DOC = (process.env.ENABLE_GOOGLE_DOC || "false").toLowerCase() === "true";
+const CONTENT_OUTPUT_MODE = (process.env.CONTENT_OUTPUT_MODE || "article").toLowerCase();
 
 
 type SendEvent = (event: ProgressEvent) => void;
@@ -545,6 +546,81 @@ ${renderBullets(brief.content_gaps)}`;
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function buildFallbackArticleDraft(
+  keyword: string,
+  country: string | undefined,
+  brief: StructuredBrief
+): string {
+  const intro = `# ${brief.h1}
+
+If you are searching for ${keyword}${country ? ` in ${country}` : ""}, this guide gives you a practical, up-to-date walkthrough based on the current search landscape.`;
+
+  const sections = brief.sections.map((section) => {
+    const sectionBody = [
+      `## ${section.heading}`,
+      `${section.purpose}`,
+      section.must_cover.length
+        ? `Key points: ${section.must_cover.join(", ")}.`
+        : "",
+      ...section.subsections.map((subsection) => {
+        const checklist = subsection.must_cover.length ? subsection.must_cover.join(", ") : "practical details and examples";
+        return `### ${subsection.heading}
+${subsection.purpose}
+In this part, focus on ${checklist}.`;
+      }),
+    ].filter(Boolean).join("\n\n");
+    return sectionBody;
+  }).join("\n\n");
+
+  const faqs = brief.faq_questions.length
+    ? `## FAQs
+\n${brief.faq_questions.map((question) => `### ${question}\nProvide a clear, direct answer tailored to the reader intent.`).join("\n\n")}`
+    : "";
+
+  return [intro, sections, faqs].filter(Boolean).join("\n\n");
+}
+
+async function openaiGenerateArticleDraft(
+  keyword: string,
+  country: string | undefined,
+  brief: StructuredBrief,
+  serpInsights: AggregatedSerpInsights,
+  searchResults: SearchResult[]
+): Promise<string> {
+  const prompt = `You are an expert SEO writer. Write a full, paste-ready article draft.
+
+KEYWORD: ${keyword}
+COUNTRY / REGION: ${country || "Not specified"}
+
+STRUCTURED BRIEF:
+${compactJson(brief)}
+
+SERP INSIGHTS:
+${compactJson(serpInsights)}
+
+TOP REFERENCES:
+${formatSearchResults(searchResults.slice(0, 5))}
+
+TASK:
+- Return ONLY the full article draft in markdown.
+- Use the provided H1/H2/H3 structure and actually write the content under each heading.
+- Do NOT write "writer notes", "must cover", or planning language.
+- Include concrete keyword-relevant details, examples, and useful specificity.
+- Keep the tone clear and practical.
+- Target approximately ${brief.word_count_range}.
+- Include an FAQ section if faq_questions are present.
+
+Output must be publishable draft text, not instructions.`;
+
+  return withRetry(async () => {
+    const response = await openai.chat.completions.create({
+      model: getModelName(),
+      messages: [{ role: "user", content: prompt }],
+    });
+    return (response.choices[0].message.content || "").trim();
+  }, 3, 4000);
 }
 
 function extractListCount(keyword: string): number | undefined {
@@ -2259,9 +2335,31 @@ export async function processSingleKeyword(
       await delay(LOAD_BACKOFF_MS);
     }
   }
-  const briefContent = renderStructuredBrief(keyword, country, structuredBrief);
+  let generatedContent = renderStructuredBrief(keyword, country, structuredBrief);
+  if (CONTENT_OUTPUT_MODE === "article") {
+    sendEvent({
+      type: "generating",
+      keyword,
+      message: `Writing full article draft for "${keyword}"...`,
+      current: index + 1,
+      total: total,
+    });
+    try {
+      const draft = await openaiGenerateArticleDraft(
+        keyword,
+        country,
+        structuredBrief,
+        serpInsights,
+        topUrls
+      );
+      generatedContent = draft || buildFallbackArticleDraft(keyword, country, structuredBrief);
+    } catch (error) {
+      log(`Article draft fallback for "${keyword}": ${error}`, "workflow");
+      generatedContent = buildFallbackArticleDraft(keyword, country, structuredBrief);
+    }
+  }
   const timestamp = new Date().toISOString();
-  const finalBrief = `${briefContent}\n\n---\nGenerated: ${timestamp}\n`;
+  const finalBrief = `${generatedContent}\n\n---\nGenerated: ${timestamp}\n`;
 
   let googleDocUrl: string | undefined;
   if (ENABLE_GOOGLE_DOC) {
