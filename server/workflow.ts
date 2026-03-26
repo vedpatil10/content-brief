@@ -422,6 +422,38 @@ function compactJson<T>(value: T): string {
   return JSON.stringify(value, null, 2);
 }
 
+function tryExtractJsonObject(raw: string): string | null {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return null;
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    return trimmed;
+  }
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    return trimmed.slice(firstBrace, lastBrace + 1);
+  }
+
+  const firstBracket = trimmed.indexOf("[");
+  const lastBracket = trimmed.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    return trimmed.slice(firstBracket, lastBracket + 1);
+  }
+
+  return null;
+}
+
+function safeParseJson<T>(raw: string, fallback: T): T {
+  try {
+    const candidate = tryExtractJsonObject(raw);
+    if (!candidate) return fallback;
+    return JSON.parse(candidate) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 function normalizeDraftSubsection(subsection: any): { heading: string; purpose: string; must_cover: string[] } | null {
   const heading = String(subsection?.heading || "").trim();
   if (!heading) return null;
@@ -895,7 +927,7 @@ Return JSON with this shape:
     });
 
     const content = response.choices[0].message.content || "{}";
-    const parsed = JSON.parse(content) as Partial<IntentProfile>;
+    const parsed = safeParseJson<Partial<IntentProfile>>(content, {});
     return {
       keywordType: String(parsed.keywordType || keywordSignals.keywordType),
       inferredIntent: String(parsed.inferredIntent || keywordSignals.inferredIntent),
@@ -1046,7 +1078,7 @@ No other text or explanation.`;
     const contentText = response.choices[0].message.content || "{}";
     
     try {
-      const parsed = JSON.parse(contentText);
+      const parsed = safeParseJson<any>(contentText, {});
       const urls = Array.isArray(parsed) ? parsed : (parsed.urls || parsed.results || Object.values(parsed)[0]);
       return Array.isArray(urls) && urls.length > 0 ? urls.slice(0, 5) : filteredResults.slice(0, 5);
     } catch {
@@ -1194,7 +1226,7 @@ Return JSON with this shape:
     });
 
     const raw = response.choices[0].message.content || "{}";
-    const parsed = JSON.parse(raw) as Partial<CompetitorInsight>;
+    const parsed = safeParseJson<Partial<CompetitorInsight>>(raw, {});
     return {
       source_url: sourceUrl,
       page_title: String(parsed.page_title || ""),
@@ -1545,7 +1577,7 @@ Return JSON with this exact top-level shape:
     });
 
     const content = response.choices[0].message.content || "{}";
-    const parsed = JSON.parse(content) as Partial<BriefBlueprint>;
+    const parsed = safeParseJson<Partial<BriefBlueprint>>(content, {});
 
     return {
       inferredIntent: parsed.inferredIntent || keywordSignals.inferredIntent,
@@ -1648,7 +1680,7 @@ Return JSON:
     });
 
     const raw = response.choices[0].message.content || "{}";
-    const parsed = JSON.parse(raw) as any;
+    const parsed = safeParseJson<any>(raw, {});
     const sections: DraftBriefSection[] = Array.isArray(parsed.sections)
       ? parsed.sections.map((section: any) => ({
           level: section?.level === "H3" ? "H3" : "H2",
@@ -1813,7 +1845,7 @@ Return JSON with this exact shape:
     });
 
     const content = response.choices[0].message.content || "{}";
-    const parsed = JSON.parse(content) as Partial<StructuredBrief>;
+    const parsed = safeParseJson<Partial<StructuredBrief>>(content, {});
     const defaultToolSections: DraftBriefSection[] = keywordSignals.primarySubject === "tools" ? [
       {
         level: "H2" as const,
@@ -2184,7 +2216,7 @@ Repair goals:
       response_format: { type: "json_object" },
     });
 
-    const parsed = JSON.parse(response.choices[0].message.content || "{}") as any;
+    const parsed = safeParseJson<any>(response.choices[0].message.content || "{}", {});
     const repairedSections: DraftBriefSection[] = Array.isArray(parsed.sections)
       ? parsed.sections
           .map(normalizeDraftSection)
