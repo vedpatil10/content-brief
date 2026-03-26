@@ -638,6 +638,43 @@ function computeTargetWordMinimum(
   return Math.min(3200, Math.max(heuristicBase, competitorBase > 0 ? Math.round(competitorBase * 0.75) : 0));
 }
 
+function buildArticlePromptBrief(brief: StructuredBrief) {
+  return {
+    h1: brief.h1,
+    search_angle: brief.search_angle,
+    target_persona: brief.target_persona,
+    word_count_range: brief.word_count_range,
+    faq_questions: brief.faq_questions.slice(0, 6),
+    sections: brief.sections.slice(0, 8).map((section) => ({
+      heading: normalizeHeadingLabel(section.heading),
+      purpose: section.purpose,
+      must_cover: section.must_cover.slice(0, 6),
+      subsections: section.subsections.slice(0, 8).map((subsection) => ({
+        heading: normalizeHeadingLabel(subsection.heading),
+        purpose: subsection.purpose,
+        must_cover: subsection.must_cover.slice(0, 4),
+      })),
+    })),
+  };
+}
+
+function buildArticlePromptSerpSummary(serpInsights: AggregatedSerpInsights) {
+  return {
+    recurringThemes: serpInsights.recurringThemes.slice(0, 12),
+    recurringEntities: serpInsights.recurringEntities.slice(0, 15),
+    recurringAttributes: serpInsights.recurringAttributes.slice(0, 12),
+    recurringFaqs: serpInsights.recurringFaqs.slice(0, 6),
+  };
+}
+
+function buildReferenceSummary(searchResults: SearchResult[]) {
+  return searchResults.slice(0, 3).map((result) => ({
+    title: normalizeWhitespace(result.title || ""),
+    url: result.link,
+    snippet: normalizeWhitespace(result.snippet || "").slice(0, 220),
+  }));
+}
+
 function buildFallbackArticleDraft(
   keyword: string,
   country: string | undefined,
@@ -681,6 +718,9 @@ async function openaiGenerateArticleDraft(
   searchResults: SearchResult[]
 ): Promise<string> {
   const minimumWords = computeTargetWordMinimum(keywordSignals, serpInsights);
+  const promptBrief = buildArticlePromptBrief(brief);
+  const promptSerpSummary = buildArticlePromptSerpSummary(serpInsights);
+  const referenceSummary = buildReferenceSummary(searchResults);
   const entityList = dedupeStrings([
     ...entityEnrichment.profiles.map((profile) => profile.name),
     ...serpInsights.recurringEntities,
@@ -693,17 +733,17 @@ COUNTRY / REGION: ${country || "Not specified"}
 KEYWORD SIGNALS:
 ${compactJson(keywordSignals)}
 
-STRUCTURED BRIEF:
-${compactJson(brief)}
+COMPACT BRIEF:
+${compactJson(promptBrief)}
 
 PRIORITY ENTITIES / ITEMS:
 ${compactJson(entityList)}
 
-SERP INSIGHTS:
-${compactJson(serpInsights)}
+SERP SUMMARY:
+${compactJson(promptSerpSummary)}
 
 TOP REFERENCES:
-${formatSearchResults(searchResults.slice(0, 5))}
+${compactJson(referenceSummary)}
 
 TASK:
 - Return ONLY the full article draft.
@@ -748,17 +788,19 @@ async function openaiExpandArticleDraft(
     keywordSignals.primarySubject === "tools" || keywordSignals.listCount ? 1800 : 1500,
     countWords(draft) + 300
   );
+  const promptBrief = buildArticlePromptBrief(brief);
+  const trimmedDraft = draft.slice(0, 14000);
   const prompt = `Expand and improve this article draft.
 
 KEYWORD: ${keyword}
 COUNTRY / REGION: ${country || "Not specified"}
 MINIMUM WORD TARGET: ${minimumWords}
 
-STRUCTURED BRIEF:
-${compactJson(brief)}
+COMPACT BRIEF:
+${compactJson(promptBrief)}
 
 CURRENT DRAFT:
-${draft}
+${trimmedDraft}
 
 TASK:
 - Return only the improved full article.
